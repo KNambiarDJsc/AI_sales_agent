@@ -1,0 +1,50 @@
+# Core
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.10.4
+pydantic-settings==2.7.1
+python-multipart==0.0.20
+
+# Database
+sqlalchemy==2.0.36
+alembic==1.14.0
+asyncpg==0.30.0
+psycopg2-binary==2.9.10
+
+# Lead ingestion
+pandas==2.2.3
+openpyxl==3.1.5
+phonenumbers==8.13.52
+
+# OpenAI (STT / TTS / LLM)
+openai==1.58.1
+
+# Telephony
+twilio==9.4.1
+httpx==0.28.1
+
+# Orchestration (installed but optional per campaign; not used until a campaign's
+# workflow complexity justifies it — see orchestrator/langgraph/README.md)
+langgraph==0.2.60
+
+# Audio processing / VAD
+numpy==2.2.1
+audioop-lts==0.2.1 ; python_version >= "3.13"
+webrtcvad-wheels==2.0.14
+
+# Observability
+opentelemetry-api==1.29.0
+opentelemetry-sdk==1.29.0
+opentelemetry-exporter-otlp==1.29.0
+opentelemetry-instrumentation-fastapi==0.50b0
+structlog==24.4.0
+
+# Utilities
+python-dotenv==1.0.1
+tenacity==9.0.0
+PyYAML==6.0.2
+
+# Testing
+pytest==8.3.4
+pytest-asyncio==0.25.0
+httpx==0.28.1

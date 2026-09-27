@@ -1,0 +1,21 @@
+# Template for a per-campaign prompt fragment. Copy this alongside a script file (e.g.
+# config/scripts/product-a.yaml) when a new campaign needs prompt-level customization
+# beyond what the script's `states` block already supports.
+#
+# PLACEHOLDER values below must come from the client before a campaign goes live.
+
+campaign_id: "PLACEHOLDER-campaign-id"
+
+product_info: >
+  PLACEHOLDER: one or two paragraphs describing what "selling on Amazon / online" service
+  is being offered, in the client's own words. Do not paraphrase or invent specifics
+  (pricing, categories, guarantees) that aren't given here.
+
+target_customer: >
+  PLACEHOLDER: who the lead sheet represents (e.g. "small manufacturers/wholesalers who
+  do not currently sell online").
+
+language: "en-IN"   # PLACEHOLDER — confirm required call language(s)
+
+call_disclosure: >
+  PLACEHOLDER — see config/prompts/system_prompt.yaml:identity_disclosure. Must match.

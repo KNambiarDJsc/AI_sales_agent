@@ -1,0 +1,59 @@
+# PLACEHOLDER qualification rules for script_id=product-a. Client must confirm the real
+# definition of "qualified." This file is read by qualification/rules.py — never encode
+# these thresholds in Python.
+
+script_id: product-a
+version: 1
+
+outcomes:
+  - qualified
+  - highly_interested
+  - mild_interest
+  - callback_requested
+  - needs_information
+  - price_objection
+  - not_interested
+  - wrong_number
+  - unavailable
+  - do_not_call
+  - uncertain
+
+# DNC always overrides every other condition — enforced in code (qualification/rules.py),
+# not just here.
+dnc_overrides_all: true
+
+interested_conditions:
+  - explicit_interest
+  - wants_more_information
+  - requests_sales_followup
+
+disqualification_conditions:
+  - not_interested
+  - do_not_call
+  - wrong_number
+
+qualified_when:
+  # A lead is "qualified" when ALL of the following facts were captured with at least
+  # `min_confidence` confidence. PLACEHOLDER — confirm exact bar with client.
+  all_of:
+    - fact: interested_in_amazon_selling
+      equals: true
+    - fact: sufficient_business_info_captured
+      equals: true
+    - fact: willing_to_be_contacted
+      equals: true
+  min_confidence: 0.6
+
+low_confidence_routes_to: uncertain
+
+evidence_required: true   # every qualification must cite the transcript turns it's based on
+
+# Dimensions the qualification engine scores per Section 20 of the architecture spec.
+# Not all campaigns need all six — client confirms which apply.
+dimensions:
+  - need
+  - fit
+  - timing
+  - authority
+  - willingness
+  - evidence

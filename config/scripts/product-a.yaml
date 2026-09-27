@@ -1,0 +1,144 @@
+# PLACEHOLDER SCRIPT — "product-a" (Amazon / online-selling lead qualification)
+#
+# This exists so the pipeline (state machine + LLM + qualification) has something
+# concrete to run end-to-end. It is NOT the client's real script. Do not use it for
+# real outbound calls. When the client provides their actual script, either replace
+# this file's content or add a new versioned file (product-a.v2.yaml) — never edit
+# Python orchestration code to change wording, questions, or thresholds.
+
+script_id: product-a
+version: 1
+language: en-IN
+
+campaign:
+  objective: "Amazon / online selling lead qualification"
+
+states:
+  INTRO:
+    objective: >
+      Greet the person, confirm you're speaking with the right contact, and identify
+      the business calling on behalf of.
+    mandatory_questions:
+      - "Confirm you're speaking with {contact_name} at {business_name}."
+    allowed_tools: [end_call]
+    fallback_response: >
+      Sorry, could you tell me if this is {business_name}?
+    transitions_on:
+      confirmed_identity: PERMISSION
+      wrong_person: WRONG_NUMBER
+      wrong_number: WRONG_NUMBER
+
+  PERMISSION:
+    objective: >
+      Briefly explain the reason for the call (helping businesses sell their products
+      on Amazon / online) and ask permission to continue.
+    mandatory_questions:
+      - "Is now an okay time for a quick two-minute call about selling your products online?"
+    allowed_tools: [schedule_callback, mark_dnc, end_call]
+    fallback_response: "No problem — would there be a better time to call back?"
+    transitions_on:
+      granted: DISCOVERY
+      bad_time: CALLBACK
+      declined: NOT_INTERESTED
+      dnc_requested: DO_NOT_CALL
+
+  DISCOVERY:
+    objective: >
+      Ask the primary qualification question: whether they're interested in selling
+      their product on Amazon / online.
+    mandatory_questions:
+      - "Are you currently selling your products on Amazon or any online marketplace?"
+      - "Would you be interested in exploring selling your product on Amazon / online?"
+    allowed_tools: [update_lead, end_call]
+    fallback_response: "Just to confirm — are you open to selling your product online?"
+    transitions_on:
+      explicit_interest: QUALIFICATION
+      already_selling: QUALIFICATION   # still worth qualifying — may want to expand/improve
+      not_interested: NOT_INTERESTED
+      not_ready: UNCERTAIN
+      uncertain: UNCERTAIN
+
+  QUALIFICATION:
+    objective: >
+      Capture enough information for the human sales team to act on: product/business
+      details and willingness to be contacted. PLACEHOLDER — client to supply the exact
+      follow-up questions and what counts as "sufficient information."
+    mandatory_questions:
+      - "What product or products are you looking to sell?"                 # PLACEHOLDER
+      - "Would you be open to a follow-up call from our sales team to discuss this further?"
+    allowed_tools: [update_lead, create_qualification, schedule_callback, end_call]
+    fallback_response: "Could you tell me a bit more about the product you'd want to sell?"
+    transitions_on:
+      qualified: INTERESTED
+      wants_callback: CALLBACK
+      wants_more_info: UNCERTAIN
+      not_interested: NOT_INTERESTED
+
+  OBJECTION_HANDLING:
+    objective: >
+      Acknowledge a stated objection (e.g. price, timing, skepticism) using only
+      information present in product_info — never invent claims.
+    allowed_tools: [update_lead, schedule_callback, end_call]
+    fallback_response: "That's a fair point — would it help if our team called to explain further?"
+    transitions_on:
+      resolved: QUALIFICATION
+      unresolved: UNCERTAIN
+      not_interested: NOT_INTERESTED
+
+  INTERESTED:
+    objective: "Confirm qualification and close the call positively."
+    allowed_tools: [create_qualification, update_lead, end_call]
+    fallback_response: "Great — thank you, our team will be in touch shortly."
+    transitions_on:
+      done: END
+
+  CALLBACK:
+    objective: "Confirm a specific callback time."
+    mandatory_questions:
+      - "What day and time works best for a follow-up call?"
+    allowed_tools: [schedule_callback, end_call]
+    fallback_response: "No problem, when would be a better time to reach you?"
+    transitions_on:
+      scheduled: END
+
+  NOT_INTERESTED:
+    objective: "Politely close the call. Optionally record a reason if offered."
+    allowed_tools: [update_lead, end_call]
+    fallback_response: "Understood, thank you for your time."
+    transitions_on:
+      done: END
+
+  DO_NOT_CALL:
+    objective: "Confirm the DNC request, apologize, and end the call immediately."
+    mandatory_questions: []
+    allowed_tools: [mark_dnc, end_call]
+    fallback_response: "Understood — we won't call again. Apologies for the disturbance."
+    transitions_on:
+      done: END
+
+  UNCERTAIN:
+    objective: >
+      Low-confidence outcome. Do not force a yes/no. Offer a follow-up path and let a
+      human review the call.
+    allowed_tools: [update_lead, schedule_callback, create_qualification, end_call]
+    fallback_response: "That's okay — would it be alright if our team followed up by call or message?"
+    transitions_on:
+      done: END
+
+  WRONG_NUMBER:
+    objective: "Confirm wrong number/person and end the call."
+    allowed_tools: [update_lead, end_call]
+    fallback_response: "Apologies for the confusion, have a good day."
+    transitions_on:
+      done: END
+
+  END:
+    objective: "Terminal state."
+    allowed_tools: []
+
+max_call_duration_seconds: 420   # PLACEHOLDER — confirm with client
+retry_limits:
+  per_question: 2
+  per_state: 3
+
+qualification_ref: config/qualification/rules.yaml
