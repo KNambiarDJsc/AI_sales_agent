@@ -43,6 +43,13 @@ class Settings(BaseSettings):
     openai_tts_voice: str = "alloy"
     openai_llm_model: str = "gpt-4o"
 
+    # STT backend: "buffered" (speech/stt/openai.py, REST, per-utterance — reliable,
+    # zero surprises) or "realtime" (speech/stt/openai_realtime.py, genuine streaming
+    # partials + fast finals via a websocket — confirmed working against a live key,
+    # see STATUS.md, but has run one verification session, not production traffic).
+    # Default stays "buffered" until "realtime" has been proven on an actual call.
+    stt_backend: Literal["buffered", "realtime"] = "buffered"
+
     # --- Telephony ---
     telephony_provider: Literal["twilio", "exotel", "freejun"] = "twilio"
 

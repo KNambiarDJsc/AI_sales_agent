@@ -31,10 +31,13 @@ from speech.tts.base import TTSProvider
 from speech.tts.openai import OPENAI_TTS_SAMPLE_RATE_HZ
 from telephony.base import TelephonyProvider
 from voice.audio.processing import (
+    TELEPHONY_SAMPLE_RATE_HZ,
+    VAD_SAMPLE_RATE_HZ,
     FrameChunker,
     ResampleState,
+    mulaw_to_pcm16,
     outbound_frame_bytes,
-    telephony_frame_to_stt_pcm16,
+    resample_pcm16,
     tts_pcm16_to_telephony_frame,
 )
 from voice.session.sentence_split import split_into_speech_chunks
@@ -44,7 +47,7 @@ from voice.vad.vad import VoiceActivityDetector
 logger = logging.getLogger(__name__)
 
 VAD_FRAME_MS = 20
-VAD_FRAME_BYTES_PCM16_16K = int(16000 * (VAD_FRAME_MS / 1000.0)) * 2  # 640 bytes
+VAD_FRAME_BYTES_PCM16_16K = int(VAD_SAMPLE_RATE_HZ * (VAD_FRAME_MS / 1000.0)) * 2  # 640 bytes
 
 
 @dataclass
@@ -73,15 +76,21 @@ class VoiceSession:
         self._session_factory = session_factory
         self._settings = get_settings()
 
-        self._vad = VoiceActivityDetector(sample_rate_hz=16000)
+        self._vad = VoiceActivityDetector(sample_rate_hz=VAD_SAMPLE_RATE_HZ)
         self._turn_taker = TurnTaker()
-        self._resample_in = ResampleState()
+        self._resample_in = ResampleState()  # mu-law 8k -> PCM16 16k, for VAD only
         self._resample_out = ResampleState()
         self._pending_pcm16 = bytearray()  # accumulates until we have a full VAD frame
 
         self._stt_provider = stt_provider
         self._stt_stream = None  # created lazily in `start()`
         self._consecutive_empty_turns = 0
+        # STT gets its own independent resample chain at whatever rate the provider
+        # declares (e.g. OpenAIRealtimeSTTProvider requires >=24kHz, the VAD stays at
+        # 16kHz regardless) — both derived straight from the same mu-law source, not
+        # one resampled from the other.
+        self._stt_input_rate_hz = stt_provider.input_sample_rate_hz
+        self._resample_stt = ResampleState()
 
         self._speaking_task: asyncio.Task | None = None
         self._ended = False
@@ -102,7 +111,15 @@ class VoiceSession:
         if self._ended or self._stt_stream is None:
             return
 
-        pcm16_16k = telephony_frame_to_stt_pcm16(mulaw_chunk, self._resample_in)
+        pcm16_native = mulaw_to_pcm16(mulaw_chunk)
+
+        # Feed the STT provider directly and continuously at its own required rate —
+        # not gated on VAD-frame chunking below, since the STT stream just needs a
+        # correctly-ordered byte stream, not 20ms-aligned frames.
+        stt_frame = resample_pcm16(pcm16_native, TELEPHONY_SAMPLE_RATE_HZ, self._stt_input_rate_hz, self._resample_stt)
+        await self._stt_stream.send_audio(stt_frame)
+
+        pcm16_16k = resample_pcm16(pcm16_native, TELEPHONY_SAMPLE_RATE_HZ, VAD_SAMPLE_RATE_HZ, self._resample_in)
         self._pending_pcm16.extend(pcm16_16k)
 
         # Backpressure guard (Section 16): if VAD/STT processing ever falls behind
@@ -124,8 +141,9 @@ class VoiceSession:
             await self._process_vad_frame(frame)
 
     async def _process_vad_frame(self, pcm16_frame: bytes) -> None:
+        # STT already received this audio (at its own rate) from handle_inbound_audio;
+        # this frame is 16kHz purely for VAD/endpointing.
         is_speech = self._vad.is_speech(pcm16_frame, frame_ms=VAD_FRAME_MS)
-        await self._stt_stream.send_audio(pcm16_frame)
         event = self._turn_taker.feed(is_speech, VAD_FRAME_MS)
 
         if event == TurnEvent.SPEECH_STARTED and self._speaking_task is not None and not self._speaking_task.done():

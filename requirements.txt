@@ -18,6 +18,7 @@ phonenumbers==8.13.52
 
 # OpenAI (STT / TTS / LLM)
 openai==1.58.1
+websockets==17.1  # speech/stt/openai_realtime.py — direct dependency, not just transitive
 
 # Telephony
 twilio==9.4.1

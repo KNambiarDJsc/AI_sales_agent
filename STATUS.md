@@ -247,21 +247,61 @@ DB round trip for any tool call → THEN start speaking. Fixed, in order of impa
     within the client-approved 550-800ms band (Section 17), just at the tighter end,
     since every ms there is dead air before the agent responds.
 
-### Not done in this pass — the next highest-leverage latency item
+### Realtime STT migration (2026-09-28) — done, verified against a live key, off by default
 
-**Migrate STT off the buffered-per-utterance REST call to OpenAI's Realtime API in
-transcription-only mode.** This remains the single largest fixed cost in the pipeline:
-today, ending a turn means waiting `vad_end_of_turn_ms` of silence, THEN uploading and
-transcribing the whole buffered utterance via one blocking REST call
-(`speech/stt/openai.py`), before the LLM call even starts. A streaming transcription
-session would collapse most of that into "the final transcript is ready almost
-immediately after VAD says the customer stopped talking." This wasn't done in this pass
-because it means writing the Realtime API's WebSocket event protocol (session config,
-`input_audio_buffer.append`, `conversation.item.input_audio_transcription.*` events)
-from documentation without a live key in this environment to verify exact field names
-against — the same reasoning that kept `telephony/exotel.py`'s streaming-applet wiring
-flagged rather than silently assumed. `STTProvider`/`STTStream` (`speech/stt/base.py`)
-were designed specifically so this swap doesn't touch any caller when it's done.
+The item above was flagged as "the next highest-leverage latency change" and deferred
+for lack of a live key to verify the wire protocol against. That blocker is gone (see
+"Live-key smoke test"), so this pass built and verified it for real rather than leaving
+it flagged again.
+
+**What it is**: `speech/stt/openai_realtime.py` (`OpenAIRealtimeSTTProvider`/
+`OpenAIRealtimeSTTStream`) — genuine streaming transcription over OpenAI's Realtime API,
+instead of `speech/stt/openai.py`'s buffered-per-utterance REST call. Partial
+transcripts arrive while the customer is still talking; the final transcript is ready
+almost immediately after our own endpointing calls `receive_final()`, instead of only
+then starting a whole-utterance upload+transcribe round trip.
+
+**The protocol was confirmed empirically, not assembled from docs alone** — OpenAI's
+own documentation disagreed with itself across pages while researching this (a search
+result mentioned `?intent=transcription` in the connection URL; the dedicated
+client-events/session reference pages omit it entirely and only show `?model=...`).
+Connected to the live API directly to settle it: without `?intent=transcription` (or a
+`model=` param) the socket closes immediately with a `missing_model` error; with it,
+everything works exactly as `openai_realtime.py`'s docstring now documents in detail
+(session.created → session.update with `turn_detection: null` → input_audio_buffer.append
+→ manual input_audio_buffer.commit → delta events → a completed event with the final
+transcript). Also confirmed empirically: **the audio-rate floor is 24kHz** — 16kHz (our
+own VAD's rate) is rejected outright ("integer below minimum value... Expected a value
+>= 24000"). Verified twice: once with a standalone exploratory script probing the raw
+protocol, once again with the actual `OpenAIRealtimeSTTProvider`/`OpenAIRealtimeSTTStream`
+classes end-to-end (synthesized real speech via our own `OpenAITTSProvider`, fed it
+through, got back an accurate transcript) — the second run is what actually matters;
+the first was protocol discovery.
+
+**This did require touching a caller**, correcting what the previous pass's note
+claimed ("designed so this swap doesn't touch any caller") — that was true at the
+interface-method level (`send_audio`/`receive_partial`/`receive_final`/`close` didn't
+change), but not at the sample-rate level: `voice/session/session.py` used to feed the
+STT stream the exact same 16kHz frames it fed its own VAD, which silently assumed every
+STT backend accepts 16kHz. It now resamples independently to `STTProvider.
+input_sample_rate_hz` (a new attribute, default 16000, overridden to 24000 by the
+realtime adapter) for the STT feed, decoupled from the VAD's fixed 16kHz feed — both
+resampled straight from the same mu-law source, not one from the other. This is still a
+small, contained change (one new attribute, ~10 changed lines in `handle_inbound_audio`),
+not a rewrite, and every existing test still passes.
+
+**Selection**: `settings.stt_backend: Literal["buffered", "realtime"]`, read via
+`speech/stt/factory.py:get_stt_provider()` (same pattern as `telephony/factory.py`).
+Wired into `apps/api/routers/media.py`. **Default stays `"buffered"`** — the live
+verification here was one account, one session, not a load test or a real phone call;
+flip it once that's been proven, the same caution as `enable_speculative_tts` before its
+own live verification.
+
+6 new unit tests (`tests/unit/test_openai_realtime_stt.py`) against a fake websocket
+connection replaying the exact event shapes observed live — session.update payload
+correctness (including that `turn_detection` is disabled and the rate is the confirmed
+floor), rejection handling, base64 audio encoding, partial accumulation, final-transcript
+retrieval + manual commit, and graceful timeout if nothing arrives. 64 tests total.
 
 ## What's a clearly-marked placeholder (do not use for a real call)
 
@@ -325,9 +365,9 @@ were designed specifically so this swap doesn't touch any caller when it's done.
 - The full replay/evaluation harness (`evaluation/replay/`) — persona definitions exist
   (`evaluation/personas/personas.py`) but the harness that drives them through
   `ConversationEngine` and asserts on outcomes is not built yet.
-- True streaming STT partials (would require the OpenAI Realtime API's transcription
-  mode) — current adapter is buffered-per-utterance; see its docstring for the
-  tradeoff and how to swap it later.
+- ~~True streaming STT partials~~ — built and live-verified; see "Realtime STT
+  migration" above. Default backend is still `"buffered"` pending a real phone call to
+  prove `"realtime"` end-to-end (not just one verification session).
 
 ## Next steps, in priority order
 
@@ -345,8 +385,9 @@ were designed specifically so this swap doesn't touch any caller when it's done.
    (end of customer speech to first audio byte reaching them) on that call before tuning
    anything further; the changes in "Latency & realtime" above are reasoned through and
    unit-tested but have not been measured against a real phone call yet.
-4. Migrate `speech/stt/*` to the OpenAI Realtime API's transcription mode — see
-   "Not done in this pass" above; this is the next highest-leverage latency change.
+4. ~~Migrate `speech/stt/*` to the OpenAI Realtime API's transcription mode~~ — done and
+   live-verified; see "Realtime STT migration" above. Set `STT_BACKEND=realtime` and
+   confirm it on an actual phone call before flipping the default.
 5. ~~Persist the customer's side of each turn~~ — done; see "Latency & realtime" #10.
    Still open: thread STT confidence through to the customer's `transcript_segment` row.
 6. When the client sends their real script/qualification rules/system prompt: replace

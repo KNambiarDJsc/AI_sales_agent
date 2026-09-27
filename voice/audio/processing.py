@@ -1,9 +1,13 @@
 """Audio codec/resample helpers (Section 16).
 
-Typical telephony path: mu-law 8kHz -> PCM16 8kHz -> resample -> PCM16 16kHz -> STT.
-The reverse path (TTS at 24kHz -> mu-law 8kHz) is used to send audio back down the
-telephony leg. This module never duplicates samples to fake a higher rate — it always
-goes through a real resampler (audioop.ratecv), per the architecture rule.
+Typical telephony path: mu-law 8kHz -> PCM16 8kHz -> resample -> PCM16 16kHz -> VAD.
+STT gets its own independent resample from the same mu-law source, at whatever rate
+the active STT provider declares (`STTProvider.input_sample_rate_hz`) — see
+`voice/session/session.py`, since not every provider accepts 16kHz (OpenAI's Realtime
+API requires >=24kHz, confirmed against a live key — see STATUS.md). The reverse path
+(TTS at 24kHz -> mu-law 8kHz) is used to send audio back down the telephony leg. This
+module never duplicates samples to fake a higher rate — it always goes through a real
+resampler (audioop.ratecv), per the architecture rule.
 """
 from __future__ import annotations
 
@@ -11,7 +15,7 @@ import audioop  # noqa: F401 -- provided by audioop-lts on Python 3.13+, stdlib 
 from dataclasses import dataclass, field
 
 TELEPHONY_SAMPLE_RATE_HZ = 8000
-STT_SAMPLE_RATE_HZ = 16000
+VAD_SAMPLE_RATE_HZ = 16000
 
 
 @dataclass
@@ -42,12 +46,6 @@ def resample_pcm16(
     converted, new_state = audioop.ratecv(pcm16_bytes, 2, channels, from_rate, to_rate, resample_state.state)
     resample_state.state = new_state
     return converted
-
-
-def telephony_frame_to_stt_pcm16(mulaw_bytes: bytes, resample_state: ResampleState) -> bytes:
-    """mu-law 8kHz (from the telephony provider) -> PCM16 16kHz (for OpenAI STT)."""
-    pcm16_8k = mulaw_to_pcm16(mulaw_bytes)
-    return resample_pcm16(pcm16_8k, TELEPHONY_SAMPLE_RATE_HZ, STT_SAMPLE_RATE_HZ, resample_state)
 
 
 def tts_pcm16_to_telephony_frame(pcm16_bytes: bytes, tts_sample_rate: int, resample_state: ResampleState) -> bytes:

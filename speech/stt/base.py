@@ -45,6 +45,12 @@ class STTStream(ABC):
 
 
 class STTProvider(ABC):
+    # PCM16 mono sample rate this provider expects fed into `send_audio` — 16kHz
+    # (matching our own VAD, Section 17) unless a provider requires something else.
+    # `voice/session/session.py` resamples specifically to this rate for the STT feed,
+    # independent of whatever rate its own VAD pipeline runs at.
+    input_sample_rate_hz: int = 16000
+
     @abstractmethod
     async def start_stream(self) -> STTStream:
         ...

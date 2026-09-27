@@ -26,7 +26,7 @@ from orchestrator.context import ConversationContext
 from orchestrator.engine import ConversationEngine
 from orchestrator.prompts import load_campaign_prompt
 from orchestrator.state_machine import StateMachine, load_script_by_id
-from speech.stt.openai import OpenAISTTProvider
+from speech.stt.factory import get_stt_provider
 from speech.tts.openai import OpenAITTSProvider
 from telephony.factory import get_telephony_provider
 from voice.session.session import SessionIdentity, VoiceSession
@@ -90,7 +90,7 @@ async def media_stream(websocket: WebSocket, call_attempt_id: uuid.UUID) -> None
     voice_session = VoiceSession(
         identity=identity,
         telephony=telephony,
-        stt_provider=OpenAISTTProvider(),
+        stt_provider=get_stt_provider(),
         tts_provider=OpenAITTSProvider(),
         engine=engine,
         session_factory=session_scope,

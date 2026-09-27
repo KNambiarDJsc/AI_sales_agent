@@ -4,11 +4,21 @@ from typing import Any
 
 import pytest
 
+from speech.stt.base import STTProvider
 from speech.tts.base import TTSProvider
 from telephony.base import CallEvent, CallStatus, OutboundCallRequest, OutboundCallResult, TelephonyProvider
 from voice.session.session import SessionIdentity, VoiceSession
 
 pytestmark = pytest.mark.asyncio
+
+
+class FakeSTTProvider(STTProvider):
+    """Never actually used by these tests (they only exercise `_speak`), but
+    VoiceSession.__init__ reads `input_sample_rate_hz` off it unconditionally at
+    construction, so a bare `None` no longer works as a placeholder."""
+
+    async def start_stream(self):  # pragma: no cover - unused in these tests
+        raise NotImplementedError
 
 
 class FakeTTSProvider(TTSProvider):
@@ -89,7 +99,7 @@ def _make_session(tts: FakeTTSProvider, telephony: FakeTelephonyProvider) -> Voi
     return VoiceSession(
         identity=_identity(),
         telephony=telephony,
-        stt_provider=None,
+        stt_provider=FakeSTTProvider(),
         tts_provider=tts,
         engine=None,
         session_factory=None,
