@@ -36,7 +36,7 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.settings import get_settings
-from database.models import Turn
+from database.models import Turn, TranscriptSegment
 from database.session import session_scope
 from llm.base import LLMProvider
 from orchestrator.context import ConversationContext
@@ -86,8 +86,10 @@ class ConversationEngine:
         conversation_id: UUID,
         on_speech_ready: OnSpeechReady | None = None,
     ) -> TurnResult:
+        customer_turn_index: int | None = None
         if customer_text.strip():
             self._context.append_turn("customer", customer_text, self._state_machine.current_state)
+            customer_turn_index = len(self._context.history) - 1
 
         messages = build_messages(self._state_machine.script, self._context)
         outcome = await self._propose_and_validate(messages, on_speech_ready)
@@ -118,7 +120,14 @@ class ConversationEngine:
         previous_state = self._state_machine.current_state
         self._state_machine.transition_to(proposal.state)
         self._context.append_turn("agent", proposal.speech, self._state_machine.current_state)
-        self._persist_turn_fire_and_forget(previous_state, proposal)
+        agent_turn_index = len(self._context.history) - 1
+        self._persist_turns_fire_and_forget(
+            customer_text=customer_text if customer_turn_index is not None else None,
+            customer_turn_index=customer_turn_index,
+            agent_turn_index=agent_turn_index,
+            previous_state=previous_state,
+            proposal=proposal,
+        )
 
         return TurnResult(
             speech=proposal.speech,
@@ -235,27 +244,70 @@ class ConversationEngine:
         active script's config, no LLM round trip needed just to break dead air."""
         return self._state_machine.fallback_response()
 
-    def _persist_turn_fire_and_forget(self, previous_state: str, proposal) -> None:
+    def _persist_turns_fire_and_forget(
+        self,
+        *,
+        customer_text: str | None,
+        customer_turn_index: int | None,
+        agent_turn_index: int,
+        previous_state: str,
+        proposal,
+    ) -> None:
         """Fire-and-forget on the engine's OWN short-lived session (never the
         turn's/tool's transactional `session` param, whose lifetime the caller owns
         and closes right after `run_turn` returns — sharing it here would race a
         background write against that close). Persistence must never sit on the
         critical path to the next audio frame; errors are logged, not raised — losing
-        a Turn row is not a reason to drop or delay a live call."""
+        a Turn row is not a reason to drop or delay a live call.
+
+        Persists BOTH sides of the turn: the customer's transcribed text (if any this
+        turn) and the agent's response, each as a Turn + TranscriptSegment row. Both
+        rows use `previous_state` — the state active while this exchange happened, not
+        the state the agent's proposal transitions *to* (that's reflected in the next
+        turn's own `state` instead, and in Conversation.current_state)."""
         conversation_id = UUID(self._context.conversation_id)
-        turn_index = len(self._context.history) - 1  # this agent turn was just appended
 
         async def _write() -> None:
             try:
                 async with session_scope() as bg_session:
-                    bg_session.add(
-                        Turn(
+                    if customer_text is not None and customer_turn_index is not None:
+                        customer_turn = Turn(
                             conversation_id=conversation_id,
-                            turn_index=turn_index,
-                            speaker="agent",
+                            turn_index=customer_turn_index,
+                            speaker="customer",
                             state=previous_state,
-                            intent=proposal.intent,
-                            raw_llm_output=proposal.model_dump(),
+                            intent=None,
+                            raw_llm_output=None,
+                        )
+                        bg_session.add(customer_turn)
+                        await bg_session.flush()  # need customer_turn.id for the segment FK
+                        bg_session.add(
+                            TranscriptSegment(
+                                conversation_id=conversation_id,
+                                turn_id=customer_turn.id,
+                                speaker="customer",
+                                text=customer_text,
+                                is_final=True,
+                            )
+                        )
+
+                    agent_turn = Turn(
+                        conversation_id=conversation_id,
+                        turn_index=agent_turn_index,
+                        speaker="agent",
+                        state=previous_state,
+                        intent=proposal.intent,
+                        raw_llm_output=proposal.model_dump(),
+                    )
+                    bg_session.add(agent_turn)
+                    await bg_session.flush()
+                    bg_session.add(
+                        TranscriptSegment(
+                            conversation_id=conversation_id,
+                            turn_id=agent_turn.id,
+                            speaker="agent",
+                            text=proposal.speech,
+                            is_final=True,
                         )
                     )
             except Exception:  # noqa: BLE001

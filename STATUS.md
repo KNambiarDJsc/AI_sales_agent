@@ -69,15 +69,17 @@ prompts, scripts, credentials, models) arrive.
   export.
 - **Observability** (`observability/`): OpenTelemetry tracing scaffold + structured
   logging with basic PII-key redaction.
-- **Tests** (`tests/unit/`): 49 real, running unit tests (no external services needed)
+- **Tests** (`tests/unit/`): 51 real, running unit tests (no external services needed)
   covering lead import/normalization, the state machine's transition rules, the
   LLM-output validator's fallback behavior (including the granular tool-vs-state
   distinction), qualification scoring, turn-taking/endpointing timing, the speculative
   streaming extractor's safety gating, the engine's speech-callback contract (never
   double-speaks, even across simulated mid-stream failures), the outbound frame
-  chunker, the sentence splitter, and an integration-style proof that TTS sentence
+  chunker, the sentence splitter, an integration-style proof that TTS sentence
   pipelining is genuinely concurrent (not just sequential-looking) plus that barge-in
-  cancellation leaves no leaked tasks or stray audio. Run: `pytest tests/unit`.
+  cancellation leaves no leaked tasks or stray audio, and that both sides of a turn
+  (customer + agent) get persisted correctly (with a fake DB session — no live Postgres
+  needed). Run: `pytest tests/unit`.
 
 ## Latency & realtime (this pass)
 
@@ -148,13 +150,16 @@ DB round trip for any tool call → THEN start speaking. Fixed, in order of impa
    already-open `AsyncSession` instead of a session-factory callable that got invoked
    fresh for every tool invocation — one connection-pool checkout per turn.
 10. **Turn persistence is fire-and-forget** (`orchestrator/engine.py:
-    _persist_turn_fire_and_forget`) on its own short-lived session, never the turn's
+    _persist_turns_fire_and_forget`) on its own short-lived session, never the turn's
     transactional one (that session's lifetime is owned by the caller and closes right
-    after `run_turn` returns — sharing it with a background write would race the close).
-    Note: only the agent's side of each turn is persisted as a `Turn` row today: the
-    customer's transcribed text isn't yet, and `transcript_segment` rows aren't
-    populated at all. Not a latency concern (writes are already off the critical path)
-    — just an honest gap, worth closing separately from this pass.
+    after `run_turn` returns — sharing it with a background write would race the
+    close). Persists **both sides** of each turn now — customer and agent — as `Turn` +
+    `TranscriptSegment` rows (tested in `tests/unit/test_engine_persistence.py`, with a
+    fake session so it needs no live Postgres). This closes what had been a flagged gap
+    (only the agent's side was recorded); `stt_confidence` on the customer's segment is
+    still not populated — `run_turn` only receives the transcribed text, not the full
+    `TranscriptResult` with confidence, and threading that through wasn't done in this
+    pass.
 11. **Endpointing default tightened** from 700ms to 600ms end-of-turn silence — still
     within the client-approved 550-800ms band (Section 17), just at the tighter end,
     since every ms there is dead air before the agent responds.
@@ -245,8 +250,8 @@ were designed specifically so this swap doesn't touch any caller when it's done.
    measured against a real phone call yet.
 4. Migrate `speech/stt/*` to the OpenAI Realtime API's transcription mode — see
    "Not done in this pass" above; this is the next highest-leverage latency change.
-5. Persist the customer's side of each turn (not just the agent's) and populate
-   `transcript_segment` — currently a gap, not a latency concern.
+5. ~~Persist the customer's side of each turn~~ — done; see "Latency & realtime" #10.
+   Still open: thread STT confidence through to the customer's `transcript_segment` row.
 6. When the client sends their real script/qualification rules/system prompt: replace
    the placeholder YAML files. No Python changes should be needed for this alone — if
    they are, that's a sign business logic leaked into code and should be pulled back
