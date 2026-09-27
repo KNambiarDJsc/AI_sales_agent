@@ -48,6 +48,43 @@ under actual telephony-quality (mu-law 8kHz origin, not TTS-synthesized) audio.
 user; **it should be rotated in the OpenAI dashboard** regardless of test outcome, since
 it's now sitting in plaintext in a conversation transcript outside this repo's control.
 
+## Real outbound call attempt (2026-09-27) — blocked by Twilio trial restrictions, not a bug here
+
+Configured real Twilio trial credentials, ran the app (`uvicorn`) exposed publicly via a
+Cloudflare quick tunnel (no account needed — `cloudflared tunnel --url http://localhost:8000`;
+ngrok was tried first but current versions require signup), created a real
+tenant/campaign/lead in the live Postgres from the previous section, and called
+`services/call_worker/dispatch.py:dispatch_next_call` directly — the exact function the
+production worker loop uses, not a special test path.
+
+**Result**: Twilio rejected the call with HTTP 400 "Invalid or disallowed parameters
+provided - trial accounts have limited parameter access." Confirmed via Twilio's own
+docs, not guessed: trial accounts can **only** place outbound calls using Twilio's own
+fixed template webhooks (the same ones shown in the Twilio Console's "Try Voice"
+tester), not custom inline TwiML or a webhook URL pointing at your own server — which
+is exactly what `telephony/twilio.py`'s `<Connect><Stream>` TwiML needs to do for our
+media pipeline to run at all. This is a hard platform restriction, confirmed against
+[Twilio's trial docs](https://www.twilio.com/docs/usage/trials/try-out-voice) and
+[error 10002](https://www.twilio.com/docs/api/errors/10002) — not a code bug, and not
+something worth working around with a throwaway inbound-call test path, since that
+wouldn't validate the actual outbound-dispatch flow the client needs anyway.
+
+**What this run did validate, for real**: the dispatch → `CallAttempt` → telephony
+adapter → error-handling path all worked exactly as designed — the failure was recorded
+as a `CallAttempt` row with `status='failed'` and the real Twilio error message, and
+`dispatch_next_call` returned `False` cleanly rather than raising or crashing anything
+(Section 23: never leave a failure unhandled). Test rows cleaned up afterward.
+
+**To actually place a real call**: upgrade the Twilio account from trial (removes the
+parameter restriction entirely — no code changes needed, the adapter is already correct)
+or provide different, non-trial credentials.
+
+**Left running for a quick retry** (not committed/persisted, gitignored `.env`):
+`uvicorn` on `localhost:8000` and a Cloudflare quick tunnel at
+`https://carl-renewable-displays-inclusive.trycloudflare.com` → `localhost:8000`. Both
+are ephemeral (the tunnel URL changes every time `cloudflared` restarts) — if a session
+picks this back up later and either isn't responding, just restart them.
+
 ## What exists and is real code (not stubs)
 
 - **Config system** (`config/settings.py`, `config/prompts/`, `config/scripts/`,
@@ -301,10 +338,13 @@ were designed specifically so this swap doesn't touch any caller when it's done.
    pasted into a chat conversation, which is outside this repo's control.
 3. Get one Twilio (or Exotel) test number working end-to-end for the vertical slice in
    Section 32 — this is the actual "definition of working" per the spec, not a fully
-   built platform. Measure real turn-around latency (end of customer speech to first
-   audio byte reaching them) on that call before tuning anything further; the changes
-   in "Latency & realtime" above are reasoned through and unit-tested but have not been
-   measured against a real phone call yet.
+   built platform. **Attempted with a Twilio trial account (see "Real outbound call
+   attempt" above) and blocked by trial restrictions, not a code issue** — upgrade the
+   Twilio account (or use non-trial credentials) and retry; the server + tunnel are
+   already set up and left running for a quick retry. Measure real turn-around latency
+   (end of customer speech to first audio byte reaching them) on that call before tuning
+   anything further; the changes in "Latency & realtime" above are reasoned through and
+   unit-tested but have not been measured against a real phone call yet.
 4. Migrate `speech/stt/*` to the OpenAI Realtime API's transcription mode — see
    "Not done in this pass" above; this is the next highest-leverage latency change.
 5. ~~Persist the customer's side of each turn~~ — done; see "Latency & realtime" #10.
