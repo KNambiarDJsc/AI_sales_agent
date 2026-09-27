@@ -1,8 +1,52 @@
 # Status
 
-Last updated: 2026-09-27 (latency/realtime pass). Read this before adding anything — it
-tracks what's real vs. placeholder, and what happens when client materials (code,
+Last updated: 2026-09-27 (live-key smoke test pass). Read this before adding anything —
+it tracks what's real vs. placeholder, and what happens when client materials (code,
 prompts, scripts, credentials, models) arrive.
+
+## Live-key smoke test (2026-09-27)
+
+A real OpenAI API key was configured locally (`.env`, gitignored — never committed) and
+used to actually exercise every adapter, not just review the code. Results:
+
+- **Auth**: works.
+- **`OpenAILLMProvider.propose()` (non-streaming structured output)**: **found and
+  fixed a real bug that would have broken every single LLM call in production.**
+  `orchestrator/schema.py`'s `AGENT_RESPONSE_JSON_SCHEMA` declared `extracted_facts`
+  and `tool_call.arguments` as `{"type": "object", "additionalProperties": true}` —
+  OpenAI's strict `json_schema` mode rejects that outright ("`additionalProperties` is
+  required to be supplied and to be false"), so every real call would have 400'd before
+  this fix. Fix: both fields are now sent on the wire as JSON-encoded *strings*
+  (strict mode has no true open-ended/map type), decoded transparently by a
+  `field_validator(mode="before")` on `ToolCallProposal`/`AgentResponseProposal` — every
+  other caller still works with plain dicts, unaware of the wire-format detail.
+  Re-verified against the live key after the fix: works, matches the schema exactly.
+  7 new regression tests in `tests/unit/test_schema.py`, including the exact wire
+  shape the live API returns.
+- **`OpenAILLMProvider.propose_stream()`**: confirmed streaming genuinely yields
+  incremental deltas alongside strict `json_schema` (49 chunks for a short response,
+  first chunk well before the object finished). This was the explicit open risk behind
+  `settings.enable_speculative_tts` — **now resolved with real evidence**, including a
+  full `ConversationEngine.run_turn()`-level check (not just the raw provider) showing
+  the speech callback fires ~250ms before full validation completes, with text that
+  matches exactly. Default flipped to **on**.
+- **`OpenAITTSProvider.synthesize_stream()`**: works (first audio byte in ~2.6-3.8s,
+  which is on the slow side for a single short sentence — worth watching once this is
+  on a real call, though variance across two runs suggests some of that is ordinary
+  API latency jitter rather than something in our code).
+- **`OpenAISTTProvider`**: works. Fed it the *actual TTS output from this same test*,
+  resampled 24kHz→16kHz through our own `voice/audio/processing.py`, and got back a
+  near-exact transcript — a real, if narrow, end-to-end proof that our own audio
+  pipeline code (not just the OpenAI SDK calls) is correct.
+
+**Not yet tested**: a real phone call (still needs Twilio/Exotel credentials + a live
+number), TTS sentence-pipelining against real (not fake) concurrent API calls, and STT
+under actual telephony-quality (mu-law 8kHz origin, not TTS-synthesized) audio.
+
+**Housekeeping**: the `.env` this was tested with is local to this environment only
+(gitignored, never committed — confirmed). The key was pasted directly into chat by the
+user; **it should be rotated in the OpenAI dashboard** regardless of test outcome, since
+it's now sitting in plaintext in a conversation transcript outside this repo's control.
 
 ## What exists and is real code (not stubs)
 
@@ -100,21 +144,23 @@ DB round trip for any tool call → THEN start speaking. Fixed, in order of impa
    fallback (the spoken text is usually written assuming that transition happened, so
    keeping it while refusing the transition would be incoherent); an invalid tool with
    a fine state/speech just gets dropped, keeping the natural response.
-3. **Optional speculative TTS start** (`settings.enable_speculative_tts`, default
-   **off**): streams the LLM's structured-output JSON (`llm/openai.py:propose_stream`)
-   and starts speaking as soon as the `speech` field has fully arrived — before
-   `tool_call`/`extracted_facts` finish streaming — instead of waiting for the whole
-   object. Safety: gated on the `state` field having already passed the same
-   `is_transition_allowed` check the non-streaming path uses
+3. **Speculative TTS start** (`settings.enable_speculative_tts`, default **on** as of
+   the live-key smoke test): streams the LLM's structured-output JSON
+   (`llm/openai.py:propose_stream`) and starts speaking as soon as the `speech` field
+   has fully arrived — before `tool_call`/`extracted_facts` finish streaming — instead
+   of waiting for the whole object. Safety: gated on the `state` field having already
+   passed the same `is_transition_allowed` check the non-streaming path uses
    (`orchestrator/streaming.py:SpeculativeTurnExtractor`); if state is invalid, nothing
    is spoken early. `orchestrator/engine.py` guarantees the speech callback fires
    *exactly once* per turn even if the stream fails partway through after speech was
    already spoken (tested in `tests/unit/test_engine_streaming.py`, including the
-   "already spoke, stream then dies" edge case). **Default is off** because this
-   environment has no live OpenAI key to confirm streaming actually arrives
-   incrementally alongside strict `json_schema` structured outputs — flip it on, watch
-   for `speculative_tts_mismatch`/`speculative_tts_error` in logs, and confirm it
-   measurably reduces time-to-first-audio before trusting it in production.
+   "already spoke, stream then dies" edge case). Confirmed against a real key (see
+   "Live-key smoke test" above): streaming does arrive incrementally alongside strict
+   `json_schema` (49 chunks for a short response), and a full
+   `ConversationEngine.run_turn()` check showed the callback firing ~250ms before full
+   validation with text matching exactly. Still watch for
+   `speculative_tts_mismatch`/`speculative_tts_error` in logs in production — one
+   account, one session is not a load test.
 4. **TTS sentence pipelining** (`settings.enable_tts_sentence_pipelining`, default on):
    `voice/session/session.py:_speak` splits multi-sentence responses
    (`voice/session/sentence_split.py`) and synthesizes every sentence concurrently
@@ -206,11 +252,9 @@ were designed specifically so this swap doesn't touch any caller when it's done.
   running). The schema/migration/repositories have not been exercised against a live
   DB — do that first thing next session (`docker compose up -d db && alembic upgrade
   head && pytest`).
-- No OpenAI API key has been used here — the STT/TTS/LLM adapters are written against
-  the documented SDK surface but not smoke-tested against a real key. This specifically
-  includes `llm/openai.py:propose_stream` (streaming + strict `json_schema` together) —
-  see "Latency & realtime" above; `settings.enable_speculative_tts` stays off until this
-  is confirmed against a real key.
+- ~~No OpenAI API key has been used here~~ — done, see "Live-key smoke test" above. All
+  three adapters (STT/TTS/LLM, including streaming) verified working against a real
+  key; one real bug found and fixed in the process (the strict-`json_schema` issue).
 - No real phone call has been placed. `apps/api/routers/media.py` implements the
   Twilio/Exotel-shaped WebSocket protocol from documentation; it has not been proven
   against an actual Twilio/Exotel account.
@@ -239,9 +283,9 @@ were designed specifically so this swap doesn't touch any caller when it's done.
 ## Next steps, in priority order
 
 1. Get a real Postgres up and run the migration; fix anything that doesn't match.
-2. Smoke-test the OpenAI adapters with a real key (a 5-second `curl`-equivalent script
-   per adapter, not a full call yet) — specifically confirm `propose_stream` yields
-   incremental deltas before flipping `enable_speculative_tts` on.
+2. ~~Smoke-test the OpenAI adapters with a real key~~ — done; see "Live-key smoke test"
+   above. Rotate that key in the OpenAI dashboard before relying on it further — it was
+   pasted into a chat conversation, which is outside this repo's control.
 3. Get one Twilio (or Exotel) test number working end-to-end for the vertical slice in
    Section 32 — this is the actual "definition of working" per the spec, not a fully
    built platform. Measure real turn-around latency (end of customer speech to first

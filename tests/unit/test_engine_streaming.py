@@ -11,6 +11,20 @@ from orchestrator.state_machine import ScriptConfig, StateConfig, StateMachine
 pytestmark = pytest.mark.asyncio
 
 
+@pytest.fixture(autouse=True)
+def _isolate_speculative_flag():
+    """`enable_speculative_tts` now defaults to True (verified against a live key —
+    see STATUS.md), but the non-streaming tests below specifically want the
+    non-streaming path in isolation. Force it False by default for every test in this
+    file and restore whatever it actually was before, rather than each test hardcoding
+    a restore value that would go stale the next time the default changes."""
+    settings = get_settings()
+    original = settings.enable_speculative_tts
+    settings.enable_speculative_tts = False
+    yield
+    settings.enable_speculative_tts = original
+
+
 def _script() -> ScriptConfig:
     return ScriptConfig(
         script_id="test",
@@ -109,82 +123,68 @@ async def test_non_streaming_llm_failure_falls_back_and_still_calls_callback_onc
 
 async def test_speculative_streaming_delivers_speech_before_stream_completes():
     get_settings().enable_speculative_tts = True
-    try:
-        payload = _valid_payload(state="DISCOVERY", speech="Are you interested in selling online?")
-        # Chunk it up character-by-character to simulate real token deltas.
-        chunks = [payload[i : i + 4] for i in range(0, len(payload), 4)]
-        engine = ConversationEngine(FakeStreamingLLM(chunks), StateMachine(_script(), "INTRO"), _context())
-        calls = []
+    payload = _valid_payload(state="DISCOVERY", speech="Are you interested in selling online?")
+    # Chunk it up character-by-character to simulate real token deltas.
+    chunks = [payload[i : i + 4] for i in range(0, len(payload), 4)]
+    engine = ConversationEngine(FakeStreamingLLM(chunks), StateMachine(_script(), "INTRO"), _context())
+    calls = []
 
-        async def on_speech_ready(speech: str) -> None:
-            calls.append(speech)
+    async def on_speech_ready(speech: str) -> None:
+        calls.append(speech)
 
-        outcome = await engine._propose_and_validate([], on_speech_ready)
-        assert outcome.accepted
-        assert calls == ["Are you interested in selling online?"]
-    finally:
-        get_settings().enable_speculative_tts = False
+    outcome = await engine._propose_and_validate([], on_speech_ready)
+    assert outcome.accepted
+    assert calls == ["Are you interested in selling online?"]
 
 
 async def test_speculative_streaming_never_double_speaks_after_mid_stream_failure():
     get_settings().enable_speculative_tts = True
-    try:
-        payload = _valid_payload(state="DISCOVERY", speech="Are you interested in selling online?")
-        chunks = [payload[i : i + 4] for i in range(0, len(payload), 4)]
-        # Fail partway through, AFTER "speech" has certainly already closed (the
-        # state+speech fields are near the start of the object).
-        engine = ConversationEngine(
-            FakeStreamingLLM(chunks, error_after=len(chunks) - 2), StateMachine(_script(), "INTRO"), _context()
-        )
-        calls = []
+    payload = _valid_payload(state="DISCOVERY", speech="Are you interested in selling online?")
+    chunks = [payload[i : i + 4] for i in range(0, len(payload), 4)]
+    # Fail partway through, AFTER "speech" has certainly already closed (the
+    # state+speech fields are near the start of the object).
+    engine = ConversationEngine(
+        FakeStreamingLLM(chunks, error_after=len(chunks) - 2), StateMachine(_script(), "INTRO"), _context()
+    )
+    calls = []
 
-        async def on_speech_ready(speech: str) -> None:
-            calls.append(speech)
+    async def on_speech_ready(speech: str) -> None:
+        calls.append(speech)
 
-        outcome = await engine._propose_and_validate([], on_speech_ready)
-        assert len(calls) == 1  # never called twice, regardless of the later failure
-        assert outcome.proposal.speech == calls[0]
-        assert outcome.proposal.state == "DISCOVERY"  # stayed consistent with what was spoken
-    finally:
-        get_settings().enable_speculative_tts = False
+    outcome = await engine._propose_and_validate([], on_speech_ready)
+    assert len(calls) == 1  # never called twice, regardless of the later failure
+    assert outcome.proposal.speech == calls[0]
+    assert outcome.proposal.state == "DISCOVERY"  # stayed consistent with what was spoken
 
 
 async def test_speculative_streaming_falls_back_to_plain_path_when_nothing_was_spoken_yet():
     get_settings().enable_speculative_tts = True
-    try:
-        # Fails immediately, before any field (let alone speech) has been extracted.
-        engine = ConversationEngine(
-            FakeStreamingLLM(["not"], error_after=0), StateMachine(_script(), "INTRO"), _context()
-        )
-        calls = []
+    # Fails immediately, before any field (let alone speech) has been extracted.
+    engine = ConversationEngine(FakeStreamingLLM(["not"], error_after=0), StateMachine(_script(), "INTRO"), _context())
+    calls = []
 
-        async def on_speech_ready(speech: str) -> None:
-            calls.append(speech)
+    async def on_speech_ready(speech: str) -> None:
+        calls.append(speech)
 
-        outcome = await engine._propose_and_validate([], on_speech_ready)
-        # Fell through to engine._llm.propose() (the non-streaming path), which for
-        # FakeStreamingLLM returns the full joined chunks — here just "not", which
-        # will fail JSON parsing and produce a safe fallback.
-        assert len(calls) == 1
-        assert outcome.used_fallback
-    finally:
-        get_settings().enable_speculative_tts = False
+    outcome = await engine._propose_and_validate([], on_speech_ready)
+    # Fell through to engine._llm.propose() (the non-streaming path), which for
+    # FakeStreamingLLM returns the full joined chunks — here just "not", which
+    # will fail JSON parsing and produce a safe fallback.
+    assert len(calls) == 1
+    assert outcome.used_fallback
 
 
 async def test_speculative_streaming_never_speaks_early_for_a_disallowed_state():
     get_settings().enable_speculative_tts = True
-    try:
-        payload = _valid_payload(state="NONEXISTENT_STATE", speech="This should not play early.")
-        chunks = [payload[i : i + 4] for i in range(0, len(payload), 4)]
-        engine = ConversationEngine(FakeStreamingLLM(chunks), StateMachine(_script(), "INTRO"), _context())
-        calls = []
+    payload = _valid_payload(state="NONEXISTENT_STATE", speech="This should not play early.")
+    chunks = [payload[i : i + 4] for i in range(0, len(payload), 4)]
+    engine = ConversationEngine(FakeStreamingLLM(chunks), StateMachine(_script(), "INTRO"), _context())
+    calls = []
 
-        async def on_speech_ready(speech: str) -> None:
-            calls.append(speech)
+    async def on_speech_ready(speech: str) -> None:
+        calls.append(speech)
 
-        outcome = await engine._propose_and_validate([], on_speech_ready)
-        assert len(calls) == 1
-        assert outcome.used_fallback
-        assert calls[0] != "This should not play early."  # got the fallback line instead
-    finally:
-        get_settings().enable_speculative_tts = False
+    outcome = await engine._propose_and_validate([], on_speech_ready)
+    assert len(calls) == 1
+    assert outcome.used_fallback
+    assert calls[0] != "This should not play early."  # got the fallback line instead

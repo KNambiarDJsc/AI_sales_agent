@@ -3,12 +3,42 @@
 The LLM proposes; it never has final authority. Every field here is a *proposal* that
 orchestrator/validator.py checks against the active script's allowed transitions/tools
 before anything is acted on.
+
+`extracted_facts` and `tool_call.arguments` are transmitted on the wire as JSON-encoded
+*strings*, not nested objects — confirmed against a live key (see STATUS.md): OpenAI's
+strict `json_schema` mode rejects an object schema with `additionalProperties: true`
+("... is required to be supplied and to be false"), and strict mode has no true
+open-ended/map type. Since both fields are genuinely open-ended by design (arbitrary,
+campaign-specific facts; per-tool argument shapes), the fix is to let the model emit
+them as a JSON string and decode that ourselves — `ToolCallProposal`/
+`AgentResponseProposal` do this transparently via a `mode="before"` validator, so every
+other caller (validator.py, tests, tools/registry.py) keeps working with plain dicts
+as before and never sees the wire-format detail.
 """
 from __future__ import annotations
 
-from typing import Any, Literal
+import json
+from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+
+def _coerce_json_object(value: Any) -> Any:
+    """Accepts either an already-parsed dict (tests, internal callers) or a
+    JSON-encoded string (what the LLM actually sends under strict mode). Never
+    raises: a malformed string degrades to an empty dict rather than blowing up the
+    whole proposal over one flexible field — the overall JSON envelope already parsed
+    fine by the time Pydantic sees this."""
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return {}
+        try:
+            decoded = json.loads(stripped)
+        except json.JSONDecodeError:
+            return {}
+        return decoded if isinstance(decoded, dict) else {}
+    return value
 
 
 class ToolCallProposal(BaseModel):
@@ -16,6 +46,11 @@ class ToolCallProposal(BaseModel):
 
     name: str
     arguments: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("arguments", mode="before")
+    @classmethod
+    def _parse_arguments(cls, value: Any) -> Any:
+        return _coerce_json_object(value)
 
 
 class AgentResponseProposal(BaseModel):
@@ -31,6 +66,11 @@ class AgentResponseProposal(BaseModel):
     tool_call: ToolCallProposal | None = None
     end_call: bool = False
 
+    @field_validator("extracted_facts", mode="before")
+    @classmethod
+    def _parse_extracted_facts(cls, value: Any) -> Any:
+        return _coerce_json_object(value)
+
 
 # JSON Schema handed to the LLM provider (Section 9/11) — kept in sync with the model
 # above by hand rather than via Pydantic's json_schema() export, because OpenAI's
@@ -43,7 +83,13 @@ AGENT_RESPONSE_JSON_SCHEMA: dict = {
         "state": {"type": "string"},
         "speech": {"type": "string"},
         "intent": {"type": "string"},
-        "extracted_facts": {"type": "object", "additionalProperties": True},
+        "extracted_facts": {
+            "type": "string",
+            "description": (
+                "A JSON-encoded object of any facts extracted this turn, e.g. "
+                '\'{"interested_in_amazon_selling": true}\'. Use \'{}\' if none.'
+            ),
+        },
         "tool_call": {
             "anyOf": [
                 {
@@ -51,7 +97,10 @@ AGENT_RESPONSE_JSON_SCHEMA: dict = {
                     "additionalProperties": False,
                     "properties": {
                         "name": {"type": "string"},
-                        "arguments": {"type": "object", "additionalProperties": True},
+                        "arguments": {
+                            "type": "string",
+                            "description": "A JSON-encoded object of arguments for this tool. Use '{}' if none.",
+                        },
                     },
                     "required": ["name", "arguments"],
                 },

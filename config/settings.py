@@ -90,12 +90,14 @@ class Settings(BaseSettings):
     # field passing the same allowed-transition check the non-streaming path uses
     # (orchestrator/streaming.py), so it never speaks text tied to a rejected
     # transition; full validation still always runs before any tool executes or the
-    # state machine transitions. Default OFF because it depends on the OpenAI SDK
-    # streaming cleanly alongside strict `json_schema` structured outputs, which this
-    # environment has not been able to smoke-test against a live API key — flip on and
-    # watch logs for `speculative_tts_mismatch`/`speculative_tts_error` before trusting
-    # it in production.
-    enable_speculative_tts: bool = False
+    # state machine transitions. Verified against a live key (STATUS.md): streaming
+    # does yield incremental deltas alongside strict `json_schema` (49 chunks for a
+    # short response), and a full ConversationEngine.run_turn() round trip confirmed
+    # the speech callback fires with text that exactly matches what full validation
+    # later confirms. Keep watching logs for `speculative_tts_mismatch`/
+    # `speculative_tts_error` in production regardless — that test was one account,
+    # one session, not a load test.
+    enable_speculative_tts: bool = True
 
     # Split multi-sentence agent responses into clauses and pipeline TTS synthesis
     # (start speaking sentence 1 while sentence 2 is still being synthesized) instead
