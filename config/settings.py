@@ -30,8 +30,11 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
 
     # --- Database ---
-    database_url: str = "postgresql+asyncpg://voiceagent:voiceagent@localhost:5432/voiceagent"
-    database_url_sync: str = "postgresql+psycopg2://voiceagent:voiceagent@localhost:5432/voiceagent"
+    # Port 55434, not the default 5432 — see docker-compose.yml/.env.example for why
+    # (avoids silently colliding with a locally-installed native Postgres on the host,
+    # or with other local projects' docker Postgres containers).
+    database_url: str = "postgresql+asyncpg://voiceagent:voiceagent@localhost:55434/voiceagent"
+    database_url_sync: str = "postgresql+psycopg2://voiceagent:voiceagent@localhost:55434/voiceagent"
 
     # --- OpenAI ---
     openai_api_key: str = ""

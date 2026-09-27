@@ -248,10 +248,22 @@ were designed specifically so this swap doesn't touch any caller when it's done.
 
 ## What's designed but not yet run against something real
 
-- No real Postgres has been started in this environment (Docker Desktop wasn't
-  running). The schema/migration/repositories have not been exercised against a live
-  DB — do that first thing next session (`docker compose up -d db && alembic upgrade
-  head && pytest`).
+- ~~No real Postgres has been started~~ — done. `docker compose up -d db && alembic
+  upgrade head` ran against a real Postgres 16 container; all 17 tables + `alembic_version`
+  landed correctly (verified with `\dt`). Also exercised the actual repository/service
+  code (not raw SQL): tenant/campaign creation, lead import with real phone
+  normalization + dedupe (a re-import correctly skipped both rows as existing), and
+  `LeadRepository.claim_next_pending`'s `FOR UPDATE SKIP LOCKED` claim (the exact
+  mechanism the call worker depends on for concurrency safety) — claimed leads in
+  order, correctly returned `None` once exhausted. Test rows cleaned up afterward.
+  **Found and fixed a real, unrelated environment issue along the way**: the
+  docker-compose default host port 5432 silently collided with a native Postgres
+  already running on the dev machine (TCP connected fine, auth failed because it was
+  hitting the wrong server) — moved to port 55434 in `docker-compose.yml`/`.env.example`/
+  `config/settings.py`'s default (55432 was also taken by an unrelated local project's
+  container). Not yet done: an actual production-scale load/concurrency test, and a
+  restart-durability check (the container has `restart: unless-stopped`, untested
+  across a real host reboot).
 - ~~No OpenAI API key has been used here~~ — done, see "Live-key smoke test" above. All
   three adapters (STT/TTS/LLM, including streaming) verified working against a real
   key; one real bug found and fixed in the process (the strict-`json_schema` issue).
@@ -282,7 +294,8 @@ were designed specifically so this swap doesn't touch any caller when it's done.
 
 ## Next steps, in priority order
 
-1. Get a real Postgres up and run the migration; fix anything that doesn't match.
+1. ~~Get a real Postgres up and run the migration~~ — done; see "What's designed but
+   not yet run against something real" above.
 2. ~~Smoke-test the OpenAI adapters with a real key~~ — done; see "Live-key smoke test"
    above. Rotate that key in the OpenAI dashboard before relying on it further — it was
    pasted into a chat conversation, which is outside this repo's control.

@@ -7,7 +7,14 @@ services:
       POSTGRES_PASSWORD: voiceagent
       POSTGRES_DB: voiceagent
     ports:
-      - "5432:5432"
+      # Host port 5432 collides with a locally-installed native Postgres on at least
+      # one dev machine this ran on (same symptom either way: TCP connects fine, but
+      # auth fails because you're silently talking to the wrong Postgres instance).
+      # 55434 on the host avoids that AND avoids other local projects' containers that
+      # already claimed 55432/55433 on this machine — the container's own port stays
+      # the standard 5432 either way. If this still collides for you, pick any free
+      # host port and update it here + .env/.env.example together.
+      - "55434:5432"
     volumes:
       - voiceagent_pg_data:/var/lib/postgresql/data
     healthcheck:
