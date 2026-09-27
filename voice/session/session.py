@@ -4,22 +4,40 @@ Owns: decoding inbound telephony audio, VAD/endpointing, buffering audio into th
 stream, invoking the orchestrator on end-of-turn, streaming TTS audio back out, and
 barge-in (Section 18). Knows nothing about SQL, campaigns, or qualification rules —
 those live behind `ConversationEngine`, which this class treats as a black box that
-takes text in and returns text + end_call out. This separation is what Section 4 means
-by "keep the media layer independent of the agent reasoning layer."
+takes text in and, via a callback, hands back speech to play plus (once the turn fully
+resolves) whether to hang up. This separation is what Section 4 means by "keep the
+media layer independent of the agent reasoning layer."
+
+See STATUS.md's "Latency & realtime" section for the reasoning behind:
+- starting to speak from `on_speech_ready` (as soon as the engine knows what to say)
+  instead of waiting for `run_turn()` to return (which also runs tool calls);
+- pipelining TTS synthesis sentence-by-sentence;
+- re-chunking outbound audio to fixed ~20ms frames;
+- bounding the inbound audio buffer;
+- timing out a stuck STT call instead of leaving the line silent forever.
 """
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from dataclasses import dataclass
 from uuid import UUID
 
+from config.settings import get_settings
 from orchestrator.engine import ConversationEngine
 from speech.stt.base import STTProvider
 from speech.tts.base import TTSProvider
 from speech.tts.openai import OPENAI_TTS_SAMPLE_RATE_HZ
 from telephony.base import TelephonyProvider
-from voice.audio.processing import ResampleState, telephony_frame_to_stt_pcm16, tts_pcm16_to_telephony_frame
+from voice.audio.processing import (
+    FrameChunker,
+    ResampleState,
+    outbound_frame_bytes,
+    telephony_frame_to_stt_pcm16,
+    tts_pcm16_to_telephony_frame,
+)
+from voice.session.sentence_split import split_into_speech_chunks
 from voice.turn_taking.turn_taking import TurnEvent, TurnTaker
 from voice.vad.vad import VoiceActivityDetector
 
@@ -53,6 +71,7 @@ class VoiceSession:
         self._tts_provider = tts_provider
         self._engine = engine
         self._session_factory = session_factory
+        self._settings = get_settings()
 
         self._vad = VoiceActivityDetector(sample_rate_hz=16000)
         self._turn_taker = TurnTaker()
@@ -62,6 +81,7 @@ class VoiceSession:
 
         self._stt_provider = stt_provider
         self._stt_stream = None  # created lazily in `start()`
+        self._consecutive_empty_turns = 0
 
         self._speaking_task: asyncio.Task | None = None
         self._ended = False
@@ -84,6 +104,19 @@ class VoiceSession:
 
         pcm16_16k = telephony_frame_to_stt_pcm16(mulaw_chunk, self._resample_in)
         self._pending_pcm16.extend(pcm16_16k)
+
+        # Backpressure guard (Section 16): if VAD/STT processing ever falls behind
+        # real time, drop the oldest audio rather than growing this buffer (and the
+        # latency of everything after it) without bound. In steady state this never
+        # triggers — each frame's processing is cheap and keeps up with the ~20ms
+        # cadence audio arrives at.
+        overflow = len(self._pending_pcm16) - self._settings.max_pending_inbound_audio_bytes
+        if overflow > 0:
+            logger.warning(
+                "inbound_audio_buffer_overflow",
+                extra={"call_id": self._identity.provider_call_id, "dropped_bytes": overflow},
+            )
+            del self._pending_pcm16[:overflow]
 
         while len(self._pending_pcm16) >= VAD_FRAME_BYTES_PCM16_16K:
             frame = bytes(self._pending_pcm16[:VAD_FRAME_BYTES_PCM16_16K])
@@ -113,39 +146,105 @@ class VoiceSession:
             self._speaking_task = None
 
     async def _on_turn_ended(self) -> None:
-        transcript = await self._stt_stream.receive_final()
+        try:
+            transcript = await asyncio.wait_for(
+                self._stt_stream.receive_final(), timeout=self._settings.stt_timeout_seconds
+            )
+        except asyncio.TimeoutError:
+            logger.warning("stt_timeout", extra={"call_id": self._identity.provider_call_id})
+            transcript = None
+        except Exception:  # noqa: BLE001 - an STT failure must not kill the call
+            logger.exception("stt_call_failed")
+            transcript = None
+
         customer_text = transcript.text if transcript else ""
         if not customer_text.strip():
-            return  # nothing intelligible captured this turn; wait for more audio
+            await self._handle_empty_turn()
+            return
+
+        self._consecutive_empty_turns = 0
         await self._run_agent_turn(customer_text)
 
-    async def _run_agent_turn(self, customer_text: str) -> None:
-        turn_result = await self._engine.run_turn(
-            customer_text,
-            session_factory=self._session_factory,
-            tenant_id=self._identity.tenant_id,
-            campaign_id=self._identity.campaign_id,
-            lead_id=self._identity.lead_id,
-            conversation_id=self._identity.conversation_id,
-        )
+    async def _handle_empty_turn(self) -> None:
+        """Silence, noise, or an STT failure/timeout produced nothing usable. A
+        handful of these are normal (the customer pausing to think); past the
+        configured threshold, proactively re-prompt with the script's own fallback
+        line instead of leaving dead air on a live phone call."""
+        self._consecutive_empty_turns += 1
+        if self._consecutive_empty_turns < self._settings.max_consecutive_empty_turns:
+            return
+        self._consecutive_empty_turns = 0
+        if self._speaking_task is not None and not self._speaking_task.done():
+            return  # already talking; don't stack another utterance on top
+        self._speaking_task = asyncio.create_task(self._speak(self._engine.current_fallback_response()))
 
-        self._speaking_task = asyncio.create_task(self._speak(turn_result.speech))
+    async def _run_agent_turn(self, customer_text: str) -> None:
+        async def on_speech_ready(speech: str) -> None:
+            # Fires as soon as the engine knows what to say — potentially before tool
+            # execution for this turn has even started (see orchestrator/engine.py) —
+            # so audio starts reaching the customer without waiting on a DB round trip.
+            self._speaking_task = asyncio.create_task(self._speak(speech))
+
+        async with self._session_factory() as session:
+            turn_result = await self._engine.run_turn(
+                customer_text,
+                session=session,
+                tenant_id=self._identity.tenant_id,
+                campaign_id=self._identity.campaign_id,
+                lead_id=self._identity.lead_id,
+                conversation_id=self._identity.conversation_id,
+                on_speech_ready=on_speech_ready,
+            )
 
         if turn_result.end_call:
-            await self._speaking_task
+            if self._speaking_task is not None:
+                await self._speaking_task
             await self._telephony.hangup_call(self._identity.provider_call_id)
             await self.close()
 
     async def _speak(self, text: str) -> None:
+        """Synthesizes and sends `text`, split into sentence-ish chunks whose TTS
+        synthesis runs concurrently (`settings.enable_tts_sentence_pipelining`): every
+        chunk's OpenAI request starts right away rather than waiting for the previous
+        chunk to fully finish, so by the time chunk 1 has finished playing, chunk 2 is
+        usually already partway (or fully) synthesized instead of starting cold."""
+        chunks = split_into_speech_chunks(text) if self._settings.enable_tts_sentence_pipelining else [text]
+        if not chunks:
+            return
+
+        queues: list[asyncio.Queue] = [asyncio.Queue(maxsize=16) for _ in chunks]
+
+        async def _produce(chunk_text: str, queue: asyncio.Queue) -> None:
+            try:
+                async for pcm16_chunk in self._tts_provider.synthesize_stream(chunk_text):
+                    await queue.put(pcm16_chunk)
+            finally:
+                await queue.put(None)  # sentinel: this chunk is done (or failed)
+
+        producer_tasks = [asyncio.create_task(_produce(chunk_text, queue)) for chunk_text, queue in zip(chunks, queues)]
+
         try:
-            async for pcm16_chunk in self._tts_provider.synthesize_stream(text):
-                telephony_frame = tts_pcm16_to_telephony_frame(
-                    pcm16_chunk, OPENAI_TTS_SAMPLE_RATE_HZ, self._resample_out
-                )
-                await self._telephony.send_audio(self._identity.provider_call_id, telephony_frame)
+            frame_chunker = FrameChunker(frame_bytes=outbound_frame_bytes(self._settings.outbound_frame_ms))
+            for queue in queues:
+                while True:
+                    item = await queue.get()
+                    if item is None:
+                        break
+                    telephony_frame = tts_pcm16_to_telephony_frame(item, OPENAI_TTS_SAMPLE_RATE_HZ, self._resample_out)
+                    for frame in frame_chunker.push(telephony_frame):
+                        await self._telephony.send_audio(self._identity.provider_call_id, frame)
+            remainder = frame_chunker.flush()
+            if remainder:
+                await self._telephony.send_audio(self._identity.provider_call_id, remainder)
         except asyncio.CancelledError:
             logger.info("tts_playback_cancelled", extra={"call_id": self._identity.provider_call_id})
             raise
+        finally:
+            for task in producer_tasks:
+                task.cancel()
+            for task in producer_tasks:
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
 
     async def close(self) -> None:
         self._ended = True

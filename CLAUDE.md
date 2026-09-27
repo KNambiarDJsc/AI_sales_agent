@@ -60,6 +60,16 @@ prospect wants to sell their product on Amazon/online — but that is campaign
    call windows, retry caps, identity disclosure policy, CRM choice) are marked exactly
    that in `STATUS.md` and inline comments — do not quietly firm them up without the
    client confirming.
+10. **The speech callback fires exactly once per turn — never zero, never twice.**
+    `orchestrator/engine.py:run_turn`'s `on_speech_ready` contract is load-bearing: the
+    voice session starts a TTS/telephony task the instant it fires, so calling it twice
+    means the agent audibly says two different things for one turn, and never calling
+    it means dead air. If you touch `_propose_and_validate`/`_propose_and_validate_streaming`,
+    re-run `tests/unit/test_engine_streaming.py` — it specifically covers the "already
+    spoke, then the stream died" and "nothing spoken yet, fall back to the plain path"
+    branches. Never let a tool call's DB round trip sit between the LLM response
+    resolving and this callback firing — that reintroduces the latency this was built
+    to remove.
 
 ## When client materials arrive (existing code, prompts, scripts, credentials)
 

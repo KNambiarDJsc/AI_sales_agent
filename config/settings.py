@@ -70,10 +70,54 @@ class Settings(BaseSettings):
     otel_service_name: str = "voice-sales-agent"
 
     # --- VAD / endpointing defaults (Section 17 of the architecture spec) ---
+    # end_of_turn defaults to the tighter end of the client-approved 550-800ms band —
+    # every ms here is dead air the customer hears before the agent responds.
     vad_speech_debounce_ms: int = Field(default=100, ge=80, le=150)
     vad_min_speech_segment_ms: int = Field(default=200, ge=150, le=250)
-    vad_end_of_turn_ms: int = Field(default=700, ge=550, le=800)
+    vad_end_of_turn_ms: int = Field(default=600, ge=550, le=800)
     vad_max_turn_seconds: int = Field(default=25, ge=20, le=30)
+
+    # --- Realtime latency / resilience tuning ---
+    # Hard deadlines so one slow provider call can't hang a live phone call
+    # indefinitely (Section 23: "explicit deadlines"). Tune per observed p95s.
+    llm_timeout_seconds: float = 8.0
+    stt_timeout_seconds: float = 6.0
+    tts_first_chunk_timeout_seconds: float = 5.0
+
+    # Stream the LLM's structured-output response and start TTS on the `speech` field
+    # as soon as it's fully decoded — before extracted_facts/tool_call/end_call finish
+    # streaming — instead of waiting for the whole JSON object. Gated on the `state`
+    # field passing the same allowed-transition check the non-streaming path uses
+    # (orchestrator/streaming.py), so it never speaks text tied to a rejected
+    # transition; full validation still always runs before any tool executes or the
+    # state machine transitions. Default OFF because it depends on the OpenAI SDK
+    # streaming cleanly alongside strict `json_schema` structured outputs, which this
+    # environment has not been able to smoke-test against a live API key — flip on and
+    # watch logs for `speculative_tts_mismatch`/`speculative_tts_error` before trusting
+    # it in production.
+    enable_speculative_tts: bool = False
+
+    # Split multi-sentence agent responses into clauses and pipeline TTS synthesis
+    # (start speaking sentence 1 while sentence 2 is still being synthesized) instead
+    # of synthesizing the whole utterance as one request. Safe to leave on: a
+    # single-sentence response behaves identically to the unsplit path.
+    enable_tts_sentence_pipelining: bool = True
+
+    # Backpressure guard (Section 16): if inbound audio piles up faster than VAD/STT
+    # can drain it, drop the oldest audio rather than growing unbounded and adding
+    # ever-increasing latency to every subsequent frame.
+    max_pending_inbound_audio_bytes: int = 32_000  # ~1s of PCM16 16kHz mono
+
+    # Outbound telephony audio is re-chunked to this many ms per media frame
+    # regardless of the TTS provider's internal chunk size — matches Twilio/Exotel's
+    # documented ~20ms media-frame convention and bounds how long a barge-in can take
+    # to actually stop new audio going out (Section 18).
+    outbound_frame_ms: int = 20
+
+    # After this many consecutive turns where STT produced no usable transcript
+    # (silence, noise, timeout), the agent proactively re-prompts instead of leaving
+    # dead air on the line.
+    max_consecutive_empty_turns: int = 2
 
 
 @lru_cache

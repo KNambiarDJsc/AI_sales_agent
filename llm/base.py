@@ -10,6 +10,7 @@ caring, and keeps "the LLM is not the authority" enforceable in one place.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
 
@@ -41,3 +42,18 @@ class LLMProvider(ABC):
         back (even empty) and let the caller's validator decide; timeouts and
         transport errors should still raise, since those are retriable failures, not
         validation failures."""
+
+    @abstractmethod
+    def propose_stream(
+        self,
+        messages: list[LLMMessage],
+        json_schema: dict,
+        schema_name: str = "agent_response",
+    ) -> AsyncIterator[str]:
+        """Same contract as `propose()`, but yields raw text deltas as they arrive
+        instead of returning once the full response is complete. Lets a caller (see
+        orchestrator/streaming.py) start acting on part of the JSON — specifically the
+        `speech` field — before the rest of the structured object has finished
+        streaming. Concatenating every yielded delta must equal exactly what `propose`
+        would have returned as `raw_text`; callers still run that full text through
+        the normal validator before trusting anything beyond the speculative speech."""

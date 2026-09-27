@@ -78,12 +78,15 @@ def test_disallowed_transition_falls_back():
     assert "NONEXISTENT_STATE" in outcome.rejections[0]
 
 
-def test_disallowed_tool_falls_back():
+def test_disallowed_tool_is_dropped_but_speech_and_state_are_kept():
+    # A bad tool call must not throw away an otherwise-good response (Section 9/10:
+    # the tool is a side effect independent of what the customer hears) — dropping the
+    # whole turn to a generic fallback here would be a needless quality regression.
     sm = StateMachine(_sample_script(), current_state="DISCOVERY")  # allowed_tools=[] + safety tools only
     raw = json.dumps(
         {
             "state": "DISCOVERY",
-            "speech": "ok",
+            "speech": "Tell me more about your product.",
             "intent": "x",
             "extracted_facts": {},
             "tool_call": {"name": "update_lead", "arguments": {}},
@@ -91,5 +94,9 @@ def test_disallowed_tool_falls_back():
         }
     )
     outcome = validate_llm_response(raw, sm)
-    assert not outcome.accepted
-    assert outcome.used_fallback
+    assert outcome.accepted
+    assert not outcome.used_fallback
+    assert outcome.proposal.speech == "Tell me more about your product."
+    assert outcome.proposal.state == "DISCOVERY"
+    assert outcome.proposal.tool_call is None  # dropped
+    assert outcome.rejections  # but recorded, for observability

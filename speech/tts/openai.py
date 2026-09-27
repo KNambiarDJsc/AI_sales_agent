@@ -4,6 +4,14 @@ Uses the streaming speech endpoint (`audio.speech.with_streaming_response.create
 `response_format="pcm"` (raw PCM16, 24kHz mono per OpenAI's docs) so audio can start
 reaching the customer before the whole utterance is synthesized. voice/audio/processing.py
 downsamples 24kHz -> 8kHz mu-law for the telephony leg.
+
+Each call to `synthesize_stream()` gets its own cancellation token instead of sharing
+one on `self`. That matters once more than one synthesis can be in flight at a time —
+`voice/session/session.py`'s sentence-pipelining starts synthesizing sentence 2 while
+sentence 1 is still streaming/playing — because a single shared, clear-on-start flag
+would let a fresh call silently un-cancel an older one that was mid-cancellation.
+`cancel()` still stops everything currently active at once, which is exactly the
+barge-in behavior we want (Section 18): all pipelined sentences stop together.
 """
 from __future__ import annotations
 
@@ -24,24 +32,31 @@ class OpenAITTSProvider(TTSProvider):
         self._client = AsyncOpenAI(api_key=settings.openai_api_key)
         self._model = settings.openai_tts_model
         self._voice = settings.openai_tts_voice
-        self._cancel_event = asyncio.Event()
+        self._active_cancel_events: set[asyncio.Event] = set()
 
     async def synthesize_stream(self, text: str) -> AsyncIterator[bytes]:
-        self._cancel_event.clear()
-        async with self._client.audio.speech.with_streaming_response.create(
-            model=self._model,
-            voice=self._voice,
-            input=text,
-            response_format="pcm",
-        ) as response:
-            async for chunk in response.iter_bytes(chunk_size=4096):
-                if self._cancel_event.is_set():
-                    break
-                if chunk:
-                    yield chunk
+        cancel_event = asyncio.Event()
+        self._active_cancel_events.add(cancel_event)
+        try:
+            async with self._client.audio.speech.with_streaming_response.create(
+                model=self._model,
+                voice=self._voice,
+                input=text,
+                response_format="pcm",
+            ) as response:
+                async for chunk in response.iter_bytes(chunk_size=4096):
+                    if cancel_event.is_set():
+                        break
+                    if chunk:
+                        yield chunk
+        finally:
+            self._active_cancel_events.discard(cancel_event)
 
     async def cancel(self) -> None:
-        self._cancel_event.set()
+        """Stop every synthesis currently in flight, not just one — safe even if
+        nothing is active (Section 18's contract for barge-in)."""
+        for event in list(self._active_cancel_events):
+            event.set()
 
     async def close(self) -> None:
-        self._cancel_event.set()
+        await self.cancel()
