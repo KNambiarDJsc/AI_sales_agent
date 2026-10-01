@@ -158,12 +158,12 @@ class ConversationEngine:
             )
         except Exception as exc:  # noqa: BLE001 - any transport failure (incl. timeout) degrades safely
             logger.exception("llm_call_failed")
-            outcome = build_fallback_outcome(self._state_machine, f"LLM call failed: {exc}")
+            outcome = build_fallback_outcome(self._state_machine, f"LLM call failed: {exc}", self._context.lead_fields)
             if on_speech_ready is not None:
                 await on_speech_ready(outcome.proposal.speech)
             return outcome
 
-        outcome = validate_llm_response(proposal_raw.raw_text, self._state_machine)
+        outcome = validate_llm_response(proposal_raw.raw_text, self._state_machine, self._context.lead_fields)
         if on_speech_ready is not None:
             await on_speech_ready(outcome.proposal.speech)
         return outcome
@@ -221,7 +221,7 @@ class ConversationEngine:
             )
 
         raw_text = "".join(chunks)
-        outcome = validate_llm_response(raw_text, self._state_machine)
+        outcome = validate_llm_response(raw_text, self._state_machine, self._context.lead_fields)
 
         if speech_delivered and outcome.proposal.speech != extractor.speech:
             # Should be structurally impossible (the extractor only reads substrings
@@ -242,7 +242,7 @@ class ConversationEngine:
         """Exposed for the voice session's silence/no-transcript re-prompt path
         (`voice/session/session.py`) — a deterministic, zero-latency line from the
         active script's config, no LLM round trip needed just to break dead air."""
-        return self._state_machine.fallback_response()
+        return self._state_machine.fallback_response(self._context.lead_fields)
 
     def _persist_turns_fire_and_forget(
         self,

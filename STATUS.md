@@ -1,8 +1,65 @@
 # Status
 
-Last updated: 2026-09-27 (live-key smoke test pass). Read this before adding anything —
-it tracks what's real vs. placeholder, and what happens when client materials (code,
+Last updated: 2026-10-01 (browser demo pass). Read this before adding anything — it
+tracks what's real vs. placeholder, and what happens when client materials (code,
 prompts, scripts, credentials, models) arrive.
+
+## Browser demo (2026-10-01) — a free, no-telephony way to show the real system working
+
+The client's stated telephony requirements (WhatsApp messages, paraphrased: Freejun for
+a Bangalore-based Indian number; OpenAI for STT/TTS — already the default; "you don't
+get a virtual number without showing ID proof") confirm what was already known: every
+telephony path needs either carrier KYC for a real Indian number (Freejun/Exotel) or a
+paid account (Twilio — trial accounts can't use the custom webhook/streaming this
+architecture needs, see "Real outbound call attempt" below). None of that blocks
+demonstrating the actual AI agent, so `apps/api/routers/demo.py` (new) runs the
+**exact same orchestration stack** — `ConversationEngine`, the real `product-a` script
+and state machine, the real tool registry and qualification engine, real OpenAI
+STT/TTS — over the browser's own microphone/speakers instead of a phone line. No
+telephony provider, no KYC, no paid account, works today.
+
+- `GET /demo` serves a single-page push-to-talk UI (hold a button, speak, release);
+  `WebSocket /demo/ws` receives each utterance as a webm/opus blob (what a browser's
+  `MediaRecorder` actually produces), transcribes it via OpenAI directly, runs it
+  through `ConversationEngine.run_turn()` exactly like a real call would, and streams
+  the synthesized response back as raw PCM16 for the browser to play via the Web Audio
+  API.
+- Provisions its own throwaway Tenant/Campaign/Lead/CallAttempt/Conversation rows per
+  session (get-or-create a "Browser Demo" tenant/campaign, fresh lead each session) —
+  this is a demo harness, not a second production transport. When real telephony is
+  available, the call path is `apps/api/routers/media.py`, not this file.
+- **Verified end-to-end against the live backend** (not just that it boots): connected
+  via FastAPI's `TestClient.websocket_connect`, sent a real TTS-synthesized "customer
+  reply" WAV (webm wasn't producible without `ffmpeg`, unavailable in this environment —
+  a real browser's `MediaRecorder` always produces genuine webm, so this only affected
+  the test harness, not `demo.py`'s production code), and confirmed a correct transcript
+  came back, followed by a real LLM-driven response with audio.
+
+**Found and fixed a real, separate bug in the process**: when a fallback response
+fires (e.g. the LLM proposes a state jump the script doesn't allow and gets correctly
+rejected — working as designed), the script's configured fallback line could contain a
+literal, never-substituted `{business_name}`-style placeholder
+(`config/scripts/product-a.yaml`'s INTRO state has exactly this). Nothing in the
+codebase ever implemented template substitution for these — the customer would have
+heard the literal token spoken aloud. This would have been immediately, embarrassingly
+visible in a live demo. Fixed: `orchestrator/state_machine.py:substitute_placeholders`
+(a `str.format_map` with a dict that leaves unknown keys as literal `{key}` rather than
+raising, so a script typo degrades gracefully instead of crashing a live call), wired
+into every place script text actually reaches the customer or the LLM's prompt
+(`orchestrator/validator.py`'s fallback construction, `orchestrator/engine.py`'s
+transport-failure fallback and the silence re-prompt, `orchestrator/prompts.py`'s
+mandatory-questions rendering). 6 new tests, including a direct regression test against
+`product-a.yaml`'s actual fallback text. Re-verified live after the fix: the fallback
+now correctly says "Sorry, could you tell me if this is Demo Business?" instead of the
+literal placeholder.
+
+**Also learned, worth knowing for later**: Exotel's trial account, unlike Twilio's,
+allows full API access and custom call-flow/webhook configuration (it only restricts to
+~10 verified numbers, no KYC needed for those) — [confirmed via their
+docs](https://developer.exotel.com/docs/getting-started/trial-account). If the client
+sets up a free Exotel trial and verifies their own number, the actual telephony path
+(not just this browser demo) could be tested for free before any KYC/paid commitment —
+worth proposing as the next concrete step once there's appetite for it.
 
 ## Live-key smoke test (2026-09-27)
 
@@ -150,10 +207,12 @@ picks this back up later and either isn't responding, just restart them.
   export.
 - **Observability** (`observability/`): OpenTelemetry tracing scaffold + structured
   logging with basic PII-key redaction.
-- **Tests** (`tests/unit/`): 51 real, running unit tests (no external services needed)
-  covering lead import/normalization, the state machine's transition rules, the
-  LLM-output validator's fallback behavior (including the granular tool-vs-state
-  distinction), qualification scoring, turn-taking/endpointing timing, the speculative
+- **Tests** (`tests/unit/`): 69 real, running unit tests (no external services needed;
+  run `pytest tests/unit` to get the current count — this number goes stale fast)
+  covering lead import/normalization, the state machine's transition rules (including
+  script placeholder substitution), the LLM-output validator's fallback behavior
+  (including the granular tool-vs-state distinction), qualification scoring,
+  turn-taking/endpointing timing, the speculative
   streaming extractor's safety gating, the engine's speech-callback contract (never
   double-speaks, even across simulated mid-stream failures), the outbound frame
   chunker, the sentence splitter, an integration-style proof that TTS sentence
@@ -301,7 +360,8 @@ own live verification.
 connection replaying the exact event shapes observed live — session.update payload
 correctness (including that `turn_detection` is disabled and the rate is the confirmed
 floor), rejection handling, base64 audio encoding, partial accumulation, final-transcript
-retrieval + manual commit, and graceful timeout if nothing arrives. 64 tests total.
+retrieval + manual commit, and graceful timeout if nothing arrives. 64 tests as of this
+pass (69 after the browser-demo pass's placeholder-substitution fix, see above).
 
 ## What's a clearly-marked placeholder (do not use for a real call)
 
@@ -380,11 +440,16 @@ retrieval + manual commit, and graceful timeout if nothing arrives. 64 tests tot
    Section 32 — this is the actual "definition of working" per the spec, not a fully
    built platform. **Attempted with a Twilio trial account (see "Real outbound call
    attempt" above) and blocked by trial restrictions, not a code issue** — upgrade the
-   Twilio account (or use non-trial credentials) and retry; the server + tunnel are
-   already set up and left running for a quick retry. Measure real turn-around latency
-   (end of customer speech to first audio byte reaching them) on that call before tuning
-   anything further; the changes in "Latency & realtime" above are reasoned through and
-   unit-tested but have not been measured against a real phone call yet.
+   Twilio account, or set up a free Exotel trial (confirmed to allow custom webhooks —
+   see "Browser demo" above), and retry. In the meantime, `/demo` (see "Browser demo"
+   above) demonstrates the real orchestration/qualification stack today without any
+   telephony account. Measure real turn-around latency (end of customer speech to first
+   audio byte reaching them) on an actual phone call before tuning anything further; the
+   changes in "Latency & realtime" above are reasoned through and unit-tested but have
+   not been measured against a real phone call yet. Note: the uvicorn server + Cloudflare
+   tunnel from the previous pass are no longer running (killed by the host OS for memory
+   pressure between sessions, and this session's `/demo` work used fresh ones) — start
+   both again before sharing a link.
 4. ~~Migrate `speech/stt/*` to the OpenAI Realtime API's transcription mode~~ — done and
    live-verified; see "Realtime STT migration" above. Set `STT_BACKEND=realtime` and
    confirm it on an actual phone call before flipping the default.

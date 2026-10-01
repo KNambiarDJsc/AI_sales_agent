@@ -14,7 +14,7 @@ import yaml
 from config.settings import PROMPTS_DIR
 from llm.base import LLMMessage
 from orchestrator.context import ConversationContext
-from orchestrator.state_machine import ScriptConfig
+from orchestrator.state_machine import ScriptConfig, substitute_placeholders
 
 
 @lru_cache
@@ -47,7 +47,7 @@ def build_system_message(script: ScriptConfig, context: ConversationContext) -> 
     ]
     if state_cfg.mandatory_questions:
         parts.append("Mandatory questions for this state (ask any not yet answered):")
-        parts.extend(f"- {q}" for q in state_cfg.mandatory_questions)
+        parts.extend(f"- {substitute_placeholders(q, context.lead_fields)}" for q in state_cfg.mandatory_questions)
     if context.lead_fields:
         parts.append(f"Known lead info: {json.dumps(context.lead_fields, ensure_ascii=False)}")
     if context.extracted_facts:

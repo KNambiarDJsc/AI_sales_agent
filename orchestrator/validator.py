@@ -29,13 +29,20 @@ from orchestrator.state_machine import StateMachine
 logger = logging.getLogger(__name__)
 
 
-def build_fallback_outcome(state_machine: StateMachine, reason: str) -> ValidationOutcome:
+def build_fallback_outcome(
+    state_machine: StateMachine, reason: str, lead_fields: dict | None = None
+) -> ValidationOutcome:
     """Public so callers outside this module (e.g. orchestrator/engine.py handling a
     transport error/timeout from the LLM call itself, which never reaches this
-    validator at all) can produce the exact same safe shape."""
+    validator at all) can produce the exact same safe shape.
+
+    `lead_fields` fills `{contact_name}`/`{business_name}`/etc. placeholders in the
+    script's fallback line (`orchestrator/state_machine.py:substitute_placeholders`) —
+    without it, a fallback would speak the literal, unsubstituted `{business_name}`
+    token to the customer, which is exactly the bug this parameter exists to prevent."""
     fallback = AgentResponseProposal(
         state=state_machine.current_state,
-        speech=state_machine.fallback_response(),
+        speech=state_machine.fallback_response(lead_fields),
         intent="unknown",
         extracted_facts={},
         tool_call=None,
@@ -44,23 +51,25 @@ def build_fallback_outcome(state_machine: StateMachine, reason: str) -> Validati
     return ValidationOutcome(accepted=False, proposal=fallback, rejections=[reason], used_fallback=True)
 
 
-def validate_llm_response(raw_text: str, state_machine: StateMachine) -> ValidationOutcome:
+def validate_llm_response(
+    raw_text: str, state_machine: StateMachine, lead_fields: dict | None = None
+) -> ValidationOutcome:
     try:
         payload = json.loads(raw_text)
     except (json.JSONDecodeError, TypeError):
         logger.warning("llm_output_validation_failed", extra={"reason": "invalid_json"})
-        return build_fallback_outcome(state_machine, "LLM output was not valid JSON")
+        return build_fallback_outcome(state_machine, "LLM output was not valid JSON", lead_fields)
 
     try:
         proposal = AgentResponseProposal.model_validate(payload)
     except ValidationError as exc:
         logger.warning("llm_output_validation_failed", extra={"reason": "schema_violation", "errors": str(exc)})
-        return build_fallback_outcome(state_machine, f"LLM output failed schema validation: {exc}")
+        return build_fallback_outcome(state_machine, f"LLM output failed schema validation: {exc}", lead_fields)
 
     if not state_machine.is_transition_allowed(proposal.state):
         reason = f"Proposed state '{proposal.state}' is not reachable from '{state_machine.current_state}'"
         logger.warning("llm_output_rejected", extra={"rejections": [reason]})
-        outcome = build_fallback_outcome(state_machine, reason)
+        outcome = build_fallback_outcome(state_machine, reason, lead_fields)
         outcome.rejections = [reason]
         return outcome
 

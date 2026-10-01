@@ -21,6 +21,28 @@ from config.settings import SCRIPTS_DIR
 GLOBAL_SAFETY_STATES = {"DO_NOT_CALL", "END"}
 
 
+class _SafeFormatDict(dict):
+    """Used with str.format_map so a script referencing a field we don't have (e.g. a
+    typo, or a field this campaign never collects) degrades to leaving the literal
+    `{field}` in place rather than raising — never crash a live call over a template
+    substitution, but still make the common case (known lead fields) actually work."""
+
+    def __missing__(self, key: str) -> str:
+        return "{" + key + "}"
+
+
+def substitute_placeholders(text: str, fields: dict) -> str:
+    """Fill `{contact_name}`/`{business_name}`/etc. placeholders in script text
+    (`mandatory_questions`, `fallback_response`) from known lead/campaign fields. A
+    no-op if there's nothing to substitute, so plain text never pays a formatting cost
+    or risks `{` in ordinary prose being misread (str.format only engages on an actual
+    `{name}` token it finds, so stray braces without a matching key are left alone too,
+    thanks to `_SafeFormatDict`)."""
+    if not text or "{" not in text:
+        return text
+    return text.format_map(_SafeFormatDict(fields))
+
+
 class StateConfig(BaseModel):
     objective: str = ""
     mandatory_questions: list[str] = Field(default_factory=list)
@@ -51,9 +73,10 @@ class ScriptConfig(BaseModel):
         # mark_dnc and end_call are always available as a safety valve.
         return tools | {"mark_dnc", "end_call"}
 
-    def fallback_for(self, state_name: str) -> str:
+    def fallback_for(self, state_name: str, fields: dict | None = None) -> str:
         state = self.states.get(state_name)
-        return state.fallback_response if state else "Sorry, could you repeat that?"
+        text = state.fallback_response if state else "Sorry, could you repeat that?"
+        return substitute_placeholders(text, fields or {})
 
 
 def load_script(path: str | Path) -> ScriptConfig:
@@ -94,8 +117,8 @@ class StateMachine:
     def allowed_tools(self) -> set[str]:
         return self.script.allowed_tools(self.current_state)
 
-    def fallback_response(self) -> str:
-        return self.script.fallback_for(self.current_state)
+    def fallback_response(self, fields: dict | None = None) -> str:
+        return self.script.fallback_for(self.current_state, fields)
 
     def retry_limit_exceeded(self) -> bool:
         limit = self.script.retry_limits.get("per_state", 3)
