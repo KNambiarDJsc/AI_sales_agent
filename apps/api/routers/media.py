@@ -134,18 +134,31 @@ async def _teardown(telephony: TelephonyProvider, provider_call_id: str, convers
 async def exotel_media_stream(websocket: WebSocket) -> None:
     """Exotel's Voicebot/Stream applet, configured with this route's static URL in
     their App Bazaar console. Correlates to our CallAttempt via the `call_sid` in
-    Exotel's own `start` event (see module docstring) rather than a path param."""
+    Exotel's own `start` event (see module docstring) rather than a path param.
+
+    Confirmed live: Exotel sends a preliminary `{"event": "connected"}` message before
+    the real `start` event, the same two-step handshake Twilio Media Streams uses. The
+    previous version of this handler treated whatever arrived first as if it had to be
+    `start`, so it rejected every real call at the `connected` message before ever
+    seeing `start` — caught via a live test call (see STATUS.md). We now skip past
+    `connected` specifically, but still reject immediately (not hang waiting) on
+    anything else unexpected."""
     await websocket.accept()
 
+    message: dict = {}
     try:
-        raw_message = await websocket.receive_text()
+        while True:
+            raw_message = await websocket.receive_text()
+            message = json.loads(raw_message)
+            event = message.get("event")
+            if event == "start":
+                break
+            if event == "connected":
+                continue
+            logger.warning("exotel_media_stream_unexpected_first_event", extra={"event": event})
+            await websocket.close(code=4400)
+            return
     except WebSocketDisconnect:
-        return
-
-    message = json.loads(raw_message)
-    if message.get("event") != "start":
-        logger.warning("exotel_media_stream_unexpected_first_event", extra={"event": message.get("event")})
-        await websocket.close(code=4400)
         return
 
     start_info = message.get("start", {})

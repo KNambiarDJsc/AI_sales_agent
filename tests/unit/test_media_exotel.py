@@ -78,6 +78,26 @@ def test_exotel_media_stream_closes_for_missing_call_sid():
 
 
 @requires_db
+def test_exotel_media_stream_skips_preliminary_connected_event():
+    # Regression test for a real bug caught via a live Exotel test call: Exotel sends
+    # a preliminary {"event": "connected"} message before the real "start" event (the
+    # same two-step handshake Twilio Media Streams uses). The handler used to treat
+    # whatever arrived first as if it had to be "start", so every real call got
+    # rejected at "connected" before "start" was ever seen, cutting the call the
+    # instant the person picked up. This proves "connected" is now skipped and "start"
+    # is still processed (closing 4404 here only because this call_sid is fake).
+    with TestClient(app) as client:
+        with client.websocket_connect("/media/exotel") as ws:
+            ws.send_text(json.dumps({"event": "connected"}))
+            ws.send_text(
+                json.dumps({"event": "start", "start": {"call_sid": f"nonexistent-{uuid.uuid4()}"}})
+            )
+            closed = ws.receive()
+            assert closed["type"] == "websocket.close"
+            assert closed["code"] == 4404
+
+
+@requires_db
 def test_exotel_media_stream_closes_for_unknown_call_sid():
     with TestClient(app) as client:
         with client.websocket_connect("/media/exotel") as ws:
