@@ -245,6 +245,31 @@ class VoiceSession:
         producer_tasks = [asyncio.create_task(_produce(chunk_text, queue)) for chunk_text, queue in zip(chunks, queues)]
 
         bytes_per_sample = 1 if self._audio_encoding == "mulaw" else 2
+        loop = asyncio.get_event_loop()
+        next_send_time = loop.time()
+
+        async def _send_paced(frame: bytes) -> None:
+            # Real-time pacing (Section 16/18): OpenAI's TTS stream doesn't arrive at a
+            # steady rate — chunks can burst well ahead of real time. Without this, we
+            # hand the telephony leg a burst of many frames almost instantly followed
+            # by a gap, which is a classic cause of choppy/stuttery playback on a phone
+            # line (the receiving side expects roughly one frame every frame_ms, not a
+            # burst). We pace to a virtual clock advancing by each frame's own actual
+            # duration (so the final, possibly-shorter flush()'d frame paces correctly
+            # too) rather than sleeping a fixed amount per send. If processing ever
+            # falls behind (e.g. a slow TTS chunk), we reset the baseline to "now"
+            # instead of bursting to catch up — catching up would just recreate the
+            # exact burst this exists to prevent.
+            nonlocal next_send_time
+            now = loop.time()
+            send_time = now
+            if next_send_time > now:
+                await asyncio.sleep(next_send_time - now)
+                send_time = next_send_time
+            await self._telephony.send_audio(self._identity.provider_call_id, frame)
+            duration_s = (len(frame) / bytes_per_sample) / TELEPHONY_SAMPLE_RATE_HZ
+            next_send_time = send_time + duration_s
+
         try:
             frame_chunker = FrameChunker(
                 frame_bytes=outbound_frame_bytes(self._settings.outbound_frame_ms, bytes_per_sample=bytes_per_sample)
@@ -259,10 +284,10 @@ class VoiceSession:
                     else:
                         telephony_frame = tts_pcm16_to_telephony_pcm16(item, OPENAI_TTS_SAMPLE_RATE_HZ, self._resample_out)
                     for frame in frame_chunker.push(telephony_frame):
-                        await self._telephony.send_audio(self._identity.provider_call_id, frame)
+                        await _send_paced(frame)
             remainder = frame_chunker.flush()
             if remainder:
-                await self._telephony.send_audio(self._identity.provider_call_id, remainder)
+                await _send_paced(remainder)
         except asyncio.CancelledError:
             logger.info("tts_playback_cancelled", extra={"call_id": self._identity.provider_call_id})
             raise

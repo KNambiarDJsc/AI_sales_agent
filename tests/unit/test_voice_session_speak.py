@@ -56,6 +56,7 @@ class FakeTelephonyProvider(TelephonyProvider):
 
     def __init__(self):
         self.sent_frames: list[bytes] = []
+        self.sent_at: list[float] = []
         self.cleared = False
 
     async def create_outbound_call(self, request: OutboundCallRequest) -> OutboundCallResult:
@@ -78,6 +79,7 @@ class FakeTelephonyProvider(TelephonyProvider):
 
     async def send_audio(self, provider_call_id: str, audio_chunk: bytes) -> None:
         self.sent_frames.append(audio_chunk)
+        self.sent_at.append(asyncio.get_event_loop().time())
 
     async def clear_audio(self, provider_call_id: str) -> None:
         self.cleared = True
@@ -141,6 +143,30 @@ async def test_speak_sends_fixed_size_frames():
     for frame in telephony.sent_frames[:-1]:
         assert len(frame) == 160
     assert len(telephony.sent_frames[-1]) <= 160
+
+
+async def test_speak_paces_frames_in_real_time_instead_of_bursting():
+    # Regression test for a real issue heard on a live Exotel test call: audio arrived
+    # choppy/robotic. Root cause: frames were sent as fast as the TTS stream + resample
+    # pipeline could produce them, with no regard for each frame's actual playback
+    # duration — OpenAI's TTS stream doesn't arrive at a steady rate, so this meant
+    # bursts of many frames almost instantly followed by gaps, which is a classic cause
+    # of stuttery telephony audio. Instant TTS production here (chunk_delay=0.0) means
+    # any spacing between sends is coming entirely from the pacing clock, not from
+    # waiting on synthesis. 5 frames of 160 bytes (20ms each at 8kHz mu-law) should
+    # take roughly 100ms of real wall-clock time to send, not a near-zero burst.
+    tts = FakeTTSProvider()
+    telephony = FakeTelephonyProvider()
+    tts.configure("Hello there.", num_chunks=5, chunk_delay=0.0, chunk_bytes=960)
+
+    session = _make_session(tts, telephony)
+    await session._speak("Hello there.")
+
+    assert len(telephony.sent_at) >= 5
+    gaps = [b - a for a, b in zip(telephony.sent_at, telephony.sent_at[1:])]
+    # Each frame is ~20ms of audio; allow generous slack for test scheduling jitter,
+    # but a burst (the bug) would produce gaps near 0, not near 0.02s.
+    assert all(gap > 0.01 for gap in gaps), gaps
 
 
 async def test_speak_sends_pcm16_frames_for_a_pcm16_telephony_provider():
