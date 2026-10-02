@@ -163,8 +163,16 @@ class VoiceSession:
         await self._tts_provider.cancel()
         await self._telephony.clear_audio(self._identity.provider_call_id)
         if self._speaking_task is not None:
-            self._speaking_task.cancel()
+            task = self._speaking_task
             self._speaking_task = None
+            task.cancel()
+            # Caught live: cancelling without awaiting left _speak()'s cleanup (which
+            # cancels its own producer tasks in a finally block) sometimes never
+            # scheduled before this was the last reference, logging "Task was
+            # destroyed but it is pending!" during a real multi-barge-in call. Awaiting
+            # here guarantees that cleanup actually runs.
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
 
     async def _on_turn_ended(self) -> None:
         try:
