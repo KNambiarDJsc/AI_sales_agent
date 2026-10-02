@@ -18,6 +18,17 @@ from llm.base import LLMMessage
 from orchestrator.context import ConversationContext
 from orchestrator.state_machine import ScriptConfig, substitute_placeholders
 
+# Human-readable names for the language codes a script's `language` field actually
+# uses (config/scripts/*.yaml) — falls back to the raw code for anything not listed
+# here rather than failing, since this is just for prompt readability.
+_LANGUAGE_NAMES = {
+    "en": "English",
+    "en-IN": "English (India)",
+    "en-US": "English (US)",
+    "hi": "Hindi",
+    "hi-IN": "Hindi (India)",
+}
+
 
 @lru_cache
 def _load_system_prompt() -> dict:
@@ -40,9 +51,14 @@ def build_system_message(script: ScriptConfig, context: ConversationContext) -> 
     except Exception:  # noqa: BLE001 - a bad/missing timezone must not break a live call
         now_local = datetime.now(ZoneInfo("UTC"))
 
+    language_name = _LANGUAGE_NAMES.get(script.language, script.language)
+
     parts = [
         system_prompt["role"],
         f"Identity disclosure requirement: {system_prompt.get('identity_disclosure', 'NOT CONFIRMED')}",
+        f"Speak only in {language_name} ({script.language}) for this entire call. Stay in this "
+        "language even if the customer switches to another language or mixes languages "
+        "(e.g. Hindi/English code-switching) — never mirror a language change mid-call.",
         f"Current date/time ({context.timezone}): {now_local.strftime('%A, %Y-%m-%d %H:%M')}. "
         "Resolve any relative time the customer gives (e.g. \"tomorrow at 8am\", \"Monday evening\") "
         "against this when calling schedule_callback — requested_time must be an absolute "

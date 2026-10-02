@@ -29,6 +29,19 @@ def test_system_message_includes_current_date_in_campaign_timezone():
     assert "schedule_callback" in message.content
 
 
+def test_system_message_instructs_a_single_consistent_language():
+    # Regression test for a real client request: with no language instruction at all,
+    # a multilingual model will naturally mirror whatever language the customer
+    # switches to mid-call (common in India, where customers code-switch between
+    # Hindi and English) - product-a.yaml declares language: en-IN, but nothing ever
+    # told the model that before this fix.
+    script = load_script_by_id("product-a")
+    context = _context()
+    message = build_system_message(script, context)
+    assert "Speak only in English (India) (en-IN)" in message.content
+    assert "even if the customer switches to another language" in message.content
+
+
 def test_system_message_lists_valid_next_states_explicitly():
     # Companion to the dynamic-enum schema fix: telling the model its options in plain
     # text (not just constraining the schema silently) is what actually produces a
