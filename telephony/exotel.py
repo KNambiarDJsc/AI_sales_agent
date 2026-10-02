@@ -1,28 +1,29 @@
 """Exotel adapter.
 
-Call control uses Exotel's documented Voice "Connect" API:
-https://developer.exotel.com/api/make-a-call-api (Calls/connect.json).
+Call control uses Exotel's documented "Outgoing Call to a Call Flow" API — the
+call-to-flow variant, confirmed via
+https://developer.exotel.com/docs/voice-v1/api-reference/outgoing-call-to-flow, which
+is distinct from the generic "Connect Two Numbers" bridge API
+(https://developer.exotel.com/api/make-a-call-api) this file originally (incorrectly)
+followed: for a pure voicebot call with no second human leg, there is **no `To`
+parameter at all** — Exotel calls `From` (the customer), and once they pick up, routes
+them straight into the App/flow named by `Url`. The account's own
+`IncomingPhoneNumbers.json` response (fetched live against the real `psyflo1` account,
+see STATUS.md) confirmed the exact `Url` shape, including `https://`, not `http://`.
 
 Realtime media uses Exotel's Voice Streaming / AgentStream, which is modeled on the
-same start/media/stop WebSocket event shape as Twilio Media Streams:
-https://developer.exotel.com/api/streaming-api-guide (AgentStream / StreamKit).
-
-IMPORTANT — verify before going live: the exact way a call gets routed into the
-streaming applet is configured per-account in Exotel's App Bazaar (a "Voicebot"/
-"Stream" applet pointing at our WebSocket URL) or via StreamKit, not purely through
-REST parameters. `create_outbound_call` below assumes the campaign's configured
-`exotel_app_id`/flow already has that applet wired to `media_websocket_url`'s host —
-confirm the exact flow configuration with Exotel support or the client's existing
-Exotel account before the first real call. Do not extend this file with additional
-guessed endpoints; ask for exact API docs/credentials from the client if something
-beyond Connect + Streaming is needed (Section 6/29).
+same start/media/stop WebSocket event shape as Twilio Media Streams — confirmed via
+https://developer.exotel.com/docs/agentstream/stream-voicebot-applet, including that
+the Voicebot/Stream applet is configured with a URL *once* in Exotel's App Bazaar
+console (not a per-call dynamic TwiML-equivalent) — see `apps/api/routers/media.py`'s
+`/media/exotel` route, which correlates a connection to our own CallAttempt via the
+`call_sid` Exotel sends in its `start` event, not a path parameter.
 """
 from __future__ import annotations
 
 import base64
 import json
 from typing import Any, Awaitable, Callable
-from urllib.parse import urlencode
 
 import httpx
 
@@ -66,15 +67,19 @@ class ExotelProvider(TelephonyProvider):
         return (self._api_key, self._api_token)
 
     async def create_outbound_call(self, request: OutboundCallRequest) -> OutboundCallResult:
+        if not self._app_id:
+            raise RuntimeError("Exotel not configured: set EXOTEL_APP_ID (the App Bazaar flow's id)")
+
         params = {
-            "From": request.to_number,  # Exotel's Connect API dials `From` first, then bridges to `To`/the flow
-            "To": request.to_number,
+            # Confirmed (see module docstring): for a call-to-flow with no second
+            # human leg, there is no `To` at all — Exotel calls `From` (the customer)
+            # and, once answered, routes straight into the App named by `Url`.
+            "From": request.to_number,
             "CallerId": self._caller_id,
+            "Url": f"https://my.exotel.com/{self._sid}/exoml/start_voice/{self._app_id}",
             "CallType": "trans",
             "StatusCallback": request.status_callback_url,
         }
-        if self._app_id:
-            params["Url"] = f"http://my.exotel.com/{self._sid}/exoml/start_voice/{self._app_id}"
         async with httpx.AsyncClient(auth=self._auth(), timeout=15.0) as client:
             resp = await client.post(f"{self._base_url}/Calls/connect.json", data=params)
             resp.raise_for_status()
