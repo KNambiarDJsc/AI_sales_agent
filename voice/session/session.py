@@ -78,7 +78,10 @@ class VoiceSession:
         self._settings = get_settings()
 
         self._audio_encoding = telephony.audio_encoding  # "mulaw" (Twilio) | "pcm16" (Exotel)
-        self._vad = VoiceActivityDetector(sample_rate_hz=VAD_SAMPLE_RATE_HZ)
+        # aggressiveness=3 (most conservative about calling something "speech"): raised
+        # from the default 2 after a live Exotel call showed real phone-line noise
+        # being misread as speech far more than a clean browser-mic demo ever surfaced.
+        self._vad = VoiceActivityDetector(sample_rate_hz=VAD_SAMPLE_RATE_HZ, aggressiveness=3)
         self._turn_taker = TurnTaker()
         self._resample_in = ResampleState()  # native 8k -> PCM16 16k, for VAD only
         self._resample_out = ResampleState()
@@ -95,6 +98,7 @@ class VoiceSession:
         self._resample_stt = ResampleState()
 
         self._speaking_task: asyncio.Task | None = None
+        self._speaking_started_at: float | None = None
         self._ended = False
 
     async def start(self) -> None:
@@ -150,7 +154,15 @@ class VoiceSession:
         event = self._turn_taker.feed(is_speech, VAD_FRAME_MS)
 
         if event == TurnEvent.SPEECH_STARTED and self._speaking_task is not None and not self._speaking_task.done():
-            await self._handle_barge_in()
+            grace_s = self._settings.barge_in_grace_ms / 1000.0
+            elapsed = asyncio.get_event_loop().time() - self._speaking_started_at if self._speaking_started_at else grace_s
+            if elapsed >= grace_s:
+                await self._handle_barge_in()
+            else:
+                logger.info(
+                    "barge_in_suppressed_grace_window",
+                    extra={"call_id": self._identity.provider_call_id, "elapsed_ms": int(elapsed * 1000)},
+                )
 
         if event in (TurnEvent.TURN_ENDED, TurnEvent.MAX_TURN_REACHED):
             await self._on_turn_ended()
@@ -175,6 +187,11 @@ class VoiceSession:
                 await task
 
     async def _on_turn_ended(self) -> None:
+        # Timing instrumentation (not guessing where per-turn latency goes): logs how
+        # long the STT-final wait itself took, separate from the LLM/TTS time logged
+        # in _run_agent_turn/_speak — added live while chasing a reported 4-5s gap.
+        loop = asyncio.get_event_loop()
+        stt_start = loop.time()
         try:
             transcript = await asyncio.wait_for(
                 self._stt_stream.receive_final(), timeout=self._settings.stt_timeout_seconds
@@ -185,6 +202,7 @@ class VoiceSession:
         except Exception:  # noqa: BLE001 - an STT failure must not kill the call
             logger.exception("stt_call_failed")
             transcript = None
+        logger.info("turn_timing_stt_final", extra={"seconds": round(loop.time() - stt_start, 3)})
 
         customer_text = transcript.text if transcript else ""
         if not customer_text.strip():
@@ -205,14 +223,23 @@ class VoiceSession:
         self._consecutive_empty_turns = 0
         if self._speaking_task is not None and not self._speaking_task.done():
             return  # already talking; don't stack another utterance on top
-        self._speaking_task = asyncio.create_task(self._speak(self._engine.current_fallback_response()))
+        self._start_speaking(self._engine.current_fallback_response())
+
+    def _start_speaking(self, text: str) -> None:
+        self._speaking_started_at = asyncio.get_event_loop().time()
+        self._speaking_task = asyncio.create_task(self._speak(text))
 
     async def _run_agent_turn(self, customer_text: str) -> None:
+        turn_start = asyncio.get_event_loop().time()
+
         async def on_speech_ready(speech: str) -> None:
             # Fires as soon as the engine knows what to say — potentially before tool
             # execution for this turn has even started (see orchestrator/engine.py) —
             # so audio starts reaching the customer without waiting on a DB round trip.
-            self._speaking_task = asyncio.create_task(self._speak(speech))
+            logger.info(
+                "turn_timing_llm_proposal", extra={"seconds": round(asyncio.get_event_loop().time() - turn_start, 3)}
+            )
+            self._start_speaking(speech)
 
         async with self._session_factory() as session:
             turn_result = await self._engine.run_turn(
@@ -255,6 +282,8 @@ class VoiceSession:
         bytes_per_sample = 1 if self._audio_encoding == "mulaw" else 2
         loop = asyncio.get_event_loop()
         next_send_time = loop.time()
+        speak_start = next_send_time
+        first_frame_logged = False
 
         async def _send_paced(frame: bytes) -> None:
             # Real-time pacing (Section 16/18): OpenAI's TTS stream doesn't arrive at a
@@ -268,13 +297,16 @@ class VoiceSession:
             # falls behind (e.g. a slow TTS chunk), we reset the baseline to "now"
             # instead of bursting to catch up — catching up would just recreate the
             # exact burst this exists to prevent.
-            nonlocal next_send_time
+            nonlocal next_send_time, first_frame_logged
             now = loop.time()
             send_time = now
             if next_send_time > now:
                 await asyncio.sleep(next_send_time - now)
                 send_time = next_send_time
             await self._telephony.send_audio(self._identity.provider_call_id, frame)
+            if not first_frame_logged:
+                first_frame_logged = True
+                logger.info("turn_timing_tts_first_frame", extra={"seconds": round(loop.time() - speak_start, 3)})
             duration_s = (len(frame) / bytes_per_sample) / TELEPHONY_SAMPLE_RATE_HZ
             next_send_time = send_time + duration_s
 

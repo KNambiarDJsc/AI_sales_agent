@@ -86,6 +86,15 @@ class Settings(BaseSettings):
     vad_min_speech_segment_ms: int = Field(default=200, ge=150, le=250)
     vad_end_of_turn_ms: int = Field(default=600, ge=550, le=800)
     vad_max_turn_seconds: int = Field(default=25, ge=20, le=30)
+    # Caught on a live Exotel call: barge-in fired before the agent's opening line had
+    # sent a single frame, repeatedly, throughout the call — almost certainly the
+    # agent's own TTS audio leaking back as "inbound" (acoustic/line echo on the real
+    # phone leg; there's no acoustic echo on a browser-mic demo, which is why this
+    # never surfaced before a real call). Each new utterance suppresses barge-in for
+    # this long after it starts speaking, to absorb a brief echo blip right at onset; a
+    # genuine human interruption is rarely over this fast, so real barge-ins still fire
+    # normally once the grace window passes.
+    barge_in_grace_ms: int = Field(default=500, ge=0, le=2000)
 
     # --- Realtime latency / resilience tuning ---
     # Hard deadlines so one slow provider call can't hang a live phone call
