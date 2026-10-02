@@ -93,6 +93,7 @@ async def _resolve_attempt_and_build_session(
             current_state="INTRO",
             lead_fields={"contact_name": lead.contact_name, "business_name": lead.business_name, **lead.extra},
             campaign_prompt=campaign_prompt,
+            timezone=campaign.timezone,
         )
         tenant_id, campaign_id_val, lead_id_val = campaign.tenant_id, campaign.id, lead.id
         telephony_provider_name = campaign.telephony_provider

@@ -131,6 +131,7 @@ async def demo_ws(websocket: WebSocket) -> None:
         campaign_prompt = load_campaign_prompt(campaign_prompt_path)
 
         tenant_id, campaign_id, lead_id, conversation_id = tenant.id, campaign.id, lead.id, conversation.id
+        campaign_timezone = campaign.timezone
 
     context = ConversationContext(
         conversation_id=str(conversation_id),
@@ -141,6 +142,7 @@ async def demo_ws(websocket: WebSocket) -> None:
         current_state="INTRO",
         lead_fields={"contact_name": lead.contact_name, "business_name": lead.business_name},
         campaign_prompt=campaign_prompt,
+        timezone=campaign_timezone,
     )
     state_machine = StateMachine(script, current_state="INTRO")
     engine = ConversationEngine(OpenAILLMProvider(), state_machine, context)

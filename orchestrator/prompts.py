@@ -6,8 +6,10 @@ together what config/prompts and config/scripts already say.
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import yaml
 
@@ -33,9 +35,18 @@ def build_system_message(script: ScriptConfig, context: ConversationContext) -> 
     state_cfg = script.states[context.current_state]
     allowed_tools = sorted(script.allowed_tools(context.current_state))
 
+    try:
+        now_local = datetime.now(ZoneInfo(context.timezone))
+    except Exception:  # noqa: BLE001 - a bad/missing timezone must not break a live call
+        now_local = datetime.now(ZoneInfo("UTC"))
+
     parts = [
         system_prompt["role"],
         f"Identity disclosure requirement: {system_prompt.get('identity_disclosure', 'NOT CONFIRMED')}",
+        f"Current date/time ({context.timezone}): {now_local.strftime('%A, %Y-%m-%d %H:%M')}. "
+        "Resolve any relative time the customer gives (e.g. \"tomorrow at 8am\", \"Monday evening\") "
+        "against this when calling schedule_callback — requested_time must be an absolute "
+        "ISO 8601 datetime, never a relative phrase.",
         "Behavior rules:",
         *[f"- {rule}" for rule in system_prompt.get("behavior_rules", [])],
         "",

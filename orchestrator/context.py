@@ -27,6 +27,12 @@ class ConversationContext:
     extracted_facts: dict[str, Any] = field(default_factory=dict)
     lead_fields: dict[str, Any] = field(default_factory=dict)  # contact_name, business_name, extra columns
     campaign_prompt: dict[str, Any] = field(default_factory=dict)  # loaded campaign_prompt yaml
+    # The campaign's own configured timezone (Campaign.timezone, e.g. "Asia/Kolkata") —
+    # not the server's. Used so the system prompt can tell the LLM what "today"/"now"
+    # actually is (see orchestrator/prompts.py): without this, a customer saying "call
+    # me tomorrow at 8am" has no anchor date to resolve against, so schedule_callback's
+    # requested_time can never be filled in correctly (caught via a client POC review).
+    timezone: str = "UTC"
 
     def append_turn(self, speaker: str, text: str, state: str) -> None:
         self.history.append(ConversationTurn(speaker=speaker, text=text, state=state))
