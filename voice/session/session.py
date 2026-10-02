@@ -98,7 +98,7 @@ class VoiceSession:
         self._resample_stt = ResampleState()
 
         self._speaking_task: asyncio.Task | None = None
-        self._speaking_started_at: float | None = None
+        self._first_frame_sent_at: float | None = None  # set in _speak(); see _process_vad_frame
         self._ended = False
 
     async def start(self) -> None:
@@ -154,15 +154,25 @@ class VoiceSession:
         event = self._turn_taker.feed(is_speech, VAD_FRAME_MS)
 
         if event == TurnEvent.SPEECH_STARTED and self._speaking_task is not None and not self._speaking_task.done():
-            grace_s = self._settings.barge_in_grace_ms / 1000.0
-            elapsed = asyncio.get_event_loop().time() - self._speaking_started_at if self._speaking_started_at else grace_s
-            if elapsed >= grace_s:
+            # Anchored to when the first frame of THIS utterance actually reached the
+            # phone (self._first_frame_sent_at, set in _speak()) — not to when the
+            # speaking task was merely created. Caught live: TTS synthesis itself can
+            # take over a second before any audio exists, which is already longer than
+            # the grace window, so anchoring to task-creation time protected nothing in
+            # practice. If no frame has been sent yet, this can't be our own echo (there
+            # is nothing yet to echo), so let it through rather than suppress it.
+            if self._first_frame_sent_at is None:
                 await self._handle_barge_in()
             else:
-                logger.info(
-                    "barge_in_suppressed_grace_window",
-                    extra={"call_id": self._identity.provider_call_id, "elapsed_ms": int(elapsed * 1000)},
-                )
+                grace_s = self._settings.barge_in_grace_ms / 1000.0
+                elapsed = asyncio.get_event_loop().time() - self._first_frame_sent_at
+                if elapsed >= grace_s:
+                    await self._handle_barge_in()
+                else:
+                    logger.info(
+                        "barge_in_suppressed_grace_window",
+                        extra={"call_id": self._identity.provider_call_id, "elapsed_ms": int(elapsed * 1000)},
+                    )
 
         if event in (TurnEvent.TURN_ENDED, TurnEvent.MAX_TURN_REACHED):
             await self._on_turn_ended()
@@ -226,7 +236,7 @@ class VoiceSession:
         self._start_speaking(self._engine.current_fallback_response())
 
     def _start_speaking(self, text: str) -> None:
-        self._speaking_started_at = asyncio.get_event_loop().time()
+        self._first_frame_sent_at = None  # reset; _speak() sets this once real audio goes out
         self._speaking_task = asyncio.create_task(self._speak(text))
 
     async def _run_agent_turn(self, customer_text: str) -> None:
@@ -306,6 +316,7 @@ class VoiceSession:
             await self._telephony.send_audio(self._identity.provider_call_id, frame)
             if not first_frame_logged:
                 first_frame_logged = True
+                self._first_frame_sent_at = loop.time()
                 logger.info("turn_timing_tts_first_frame", extra={"seconds": round(loop.time() - speak_start, 3)})
             duration_s = (len(frame) / bytes_per_sample) / TELEPHONY_SAMPLE_RATE_HZ
             next_send_time = send_time + duration_s
