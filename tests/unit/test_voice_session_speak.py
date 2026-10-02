@@ -143,6 +143,28 @@ async def test_speak_sends_fixed_size_frames():
     assert len(telephony.sent_frames[-1]) <= 160
 
 
+async def test_speak_sends_pcm16_frames_for_a_pcm16_telephony_provider():
+    # Regression test for a real bug caught via a live Exotel test call: Exotel's
+    # Voicebot/Stream applet uses raw linear PCM16 8kHz, not mu-law like Twilio, but
+    # VoiceSession used to hardcode the mu-law path for every provider — so outbound
+    # audio was mu-law-encoded when Exotel expected PCM16 (and inbound audio was
+    # decoded as mu-law when it was already PCM16), producing no intelligible audio in
+    # either direction. This proves a provider declaring audio_encoding="pcm16" gets
+    # PCM16 frames (320 bytes = 20ms * 8000Hz * 2 bytes/sample), not mu-law ones (160).
+    tts = FakeTTSProvider()
+    telephony = FakeTelephonyProvider()
+    telephony.audio_encoding = "pcm16"
+    tts.configure("Hello there.", num_chunks=5, chunk_delay=0.0, chunk_bytes=960)
+
+    session = _make_session(tts, telephony)
+    await session._speak("Hello there.")
+
+    assert len(telephony.sent_frames) > 1
+    for frame in telephony.sent_frames[:-1]:
+        assert len(frame) == 320
+    assert len(telephony.sent_frames[-1]) <= 320
+
+
 async def test_speak_cancellation_stops_producers_cleanly():
     tts = FakeTTSProvider()
     telephony = FakeTelephonyProvider()

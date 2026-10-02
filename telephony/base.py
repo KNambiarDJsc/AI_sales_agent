@@ -59,6 +59,16 @@ class TelephonyProvider(ABC):
     wrapper of the provider's API surface."""
 
     name: str
+    # The encoding each provider's media WebSocket actually sends/expects on the audio
+    # leg, confirmed per-provider against real docs/live calls — never assumed. Twilio
+    # Media Streams is mu-law 8kHz (the long-standing telephony default); Exotel's
+    # Voicebot/Stream applet is raw linear PCM16 8kHz (confirmed against
+    # developer.exotel.com/docs/agentstream/stream-voicebot-applet, and against a real
+    # call: decoding Exotel's own PCM16 bytes as mu-law produced VAD-triggering noise
+    # with no intelligible audio in either direction — see STATUS.md).
+    # `voice/session/session.py`'s VoiceSession reads this to pick the right codec path
+    # instead of hardcoding one provider's assumption for every provider.
+    audio_encoding: str = "mulaw"  # "mulaw" | "pcm16"
 
     @abstractmethod
     async def create_outbound_call(self, request: OutboundCallRequest) -> OutboundCallResult:

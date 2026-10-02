@@ -1,13 +1,17 @@
 """Audio codec/resample helpers (Section 16).
 
-Typical telephony path: mu-law 8kHz -> PCM16 8kHz -> resample -> PCM16 16kHz -> VAD.
-STT gets its own independent resample from the same mu-law source, at whatever rate
-the active STT provider declares (`STTProvider.input_sample_rate_hz`) — see
-`voice/session/session.py`, since not every provider accepts 16kHz (OpenAI's Realtime
-API requires >=24kHz, confirmed against a live key — see STATUS.md). The reverse path
-(TTS at 24kHz -> mu-law 8kHz) is used to send audio back down the telephony leg. This
-module never duplicates samples to fake a higher rate — it always goes through a real
-resampler (audioop.ratecv), per the architecture rule.
+Twilio path: mu-law 8kHz -> PCM16 8kHz -> resample -> PCM16 16kHz -> VAD. Exotel's
+Voicebot/Stream applet sends/expects raw linear PCM16 8kHz directly, no mu-law step at
+all (confirmed against developer.exotel.com/docs/agentstream/stream-voicebot-applet,
+and against a real call — see STATUS.md); `tts_pcm16_to_telephony_pcm16` and
+`mulaw_to_pcm16`/`pcm16_to_mulaw`'s absence from that path are how `VoiceSession`
+(`voice/session/session.py`) branches on `TelephonyProvider.audio_encoding` rather
+than assuming one provider's encoding for every provider. STT gets its own independent
+resample from the same native-rate source, at whatever rate the active STT provider
+declares (`STTProvider.input_sample_rate_hz`), since not every provider accepts 16kHz
+(OpenAI's Realtime API requires >=24kHz, confirmed against a live key — see
+STATUS.md). This module never duplicates samples to fake a higher rate — it always
+goes through a real resampler (audioop.ratecv), per the architecture rule.
 """
 from __future__ import annotations
 
@@ -49,14 +53,22 @@ def resample_pcm16(
 
 
 def tts_pcm16_to_telephony_frame(pcm16_bytes: bytes, tts_sample_rate: int, resample_state: ResampleState) -> bytes:
-    """PCM16 at the TTS provider's native rate -> mu-law 8kHz for the telephony leg."""
+    """PCM16 at the TTS provider's native rate -> mu-law 8kHz, for mu-law telephony legs
+    (Twilio Media Streams)."""
     pcm16_8k = resample_pcm16(pcm16_bytes, tts_sample_rate, TELEPHONY_SAMPLE_RATE_HZ, resample_state)
     return pcm16_to_mulaw(pcm16_8k)
 
 
-def outbound_frame_bytes(frame_ms: int, sample_rate_hz: int = TELEPHONY_SAMPLE_RATE_HZ) -> int:
-    """mu-law is 1 byte/sample, so this is just samples-per-frame."""
-    return int(sample_rate_hz * frame_ms / 1000)
+def tts_pcm16_to_telephony_pcm16(pcm16_bytes: bytes, tts_sample_rate: int, resample_state: ResampleState) -> bytes:
+    """PCM16 at the TTS provider's native rate -> PCM16 8kHz, for linear-PCM telephony
+    legs (Exotel's Voicebot/Stream applet — no mu-law step, it's raw PCM16 already)."""
+    return resample_pcm16(pcm16_bytes, tts_sample_rate, TELEPHONY_SAMPLE_RATE_HZ, resample_state)
+
+
+def outbound_frame_bytes(frame_ms: int, sample_rate_hz: int = TELEPHONY_SAMPLE_RATE_HZ, bytes_per_sample: int = 1) -> int:
+    """mu-law is 1 byte/sample; linear PCM16 is 2 bytes/sample — pass
+    `bytes_per_sample=2` for a PCM16 telephony leg."""
+    return int(sample_rate_hz * frame_ms / 1000) * bytes_per_sample
 
 
 @dataclass

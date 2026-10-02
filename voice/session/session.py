@@ -39,6 +39,7 @@ from voice.audio.processing import (
     outbound_frame_bytes,
     resample_pcm16,
     tts_pcm16_to_telephony_frame,
+    tts_pcm16_to_telephony_pcm16,
 )
 from voice.session.sentence_split import split_into_speech_chunks
 from voice.turn_taking.turn_taking import TurnEvent, TurnTaker
@@ -76,9 +77,10 @@ class VoiceSession:
         self._session_factory = session_factory
         self._settings = get_settings()
 
+        self._audio_encoding = telephony.audio_encoding  # "mulaw" (Twilio) | "pcm16" (Exotel)
         self._vad = VoiceActivityDetector(sample_rate_hz=VAD_SAMPLE_RATE_HZ)
         self._turn_taker = TurnTaker()
-        self._resample_in = ResampleState()  # mu-law 8k -> PCM16 16k, for VAD only
+        self._resample_in = ResampleState()  # native 8k -> PCM16 16k, for VAD only
         self._resample_out = ResampleState()
         self._pending_pcm16 = bytearray()  # accumulates until we have a full VAD frame
 
@@ -105,13 +107,14 @@ class VoiceSession:
         the opening line as to every other turn."""
         await self._run_agent_turn("")
 
-    async def handle_inbound_audio(self, mulaw_chunk: bytes) -> None:
+    async def handle_inbound_audio(self, audio_chunk: bytes) -> None:
         """Called by the WebSocket handler for every inbound media frame from the
-        telephony provider (mu-law 8kHz)."""
+        telephony provider, already in that provider's own encoding (mu-law 8kHz for
+        Twilio, raw PCM16 8kHz for Exotel — see `TelephonyProvider.audio_encoding`)."""
         if self._ended or self._stt_stream is None:
             return
 
-        pcm16_native = mulaw_to_pcm16(mulaw_chunk)
+        pcm16_native = mulaw_to_pcm16(audio_chunk) if self._audio_encoding == "mulaw" else audio_chunk
 
         # Feed the STT provider directly and continuously at its own required rate —
         # not gated on VAD-frame chunking below, since the STT stream just needs a
@@ -241,14 +244,20 @@ class VoiceSession:
 
         producer_tasks = [asyncio.create_task(_produce(chunk_text, queue)) for chunk_text, queue in zip(chunks, queues)]
 
+        bytes_per_sample = 1 if self._audio_encoding == "mulaw" else 2
         try:
-            frame_chunker = FrameChunker(frame_bytes=outbound_frame_bytes(self._settings.outbound_frame_ms))
+            frame_chunker = FrameChunker(
+                frame_bytes=outbound_frame_bytes(self._settings.outbound_frame_ms, bytes_per_sample=bytes_per_sample)
+            )
             for queue in queues:
                 while True:
                     item = await queue.get()
                     if item is None:
                         break
-                    telephony_frame = tts_pcm16_to_telephony_frame(item, OPENAI_TTS_SAMPLE_RATE_HZ, self._resample_out)
+                    if self._audio_encoding == "mulaw":
+                        telephony_frame = tts_pcm16_to_telephony_frame(item, OPENAI_TTS_SAMPLE_RATE_HZ, self._resample_out)
+                    else:
+                        telephony_frame = tts_pcm16_to_telephony_pcm16(item, OPENAI_TTS_SAMPLE_RATE_HZ, self._resample_out)
                     for frame in frame_chunker.push(telephony_frame):
                         await self._telephony.send_audio(self._identity.provider_call_id, frame)
             remainder = frame_chunker.flush()

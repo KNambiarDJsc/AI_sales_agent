@@ -46,6 +46,7 @@ SendFn = Callable[[str], Awaitable[None]]
 
 class ExotelProvider(TelephonyProvider):
     name = "exotel"
+    audio_encoding = "pcm16"
 
     def __init__(self) -> None:
         settings = get_settings()
