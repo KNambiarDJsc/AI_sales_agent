@@ -1,8 +1,55 @@
 # Status
 
-Last updated: 2026-10-01 (browser demo pass). Read this before adding anything — it
-tracks what's real vs. placeholder, and what happens when client materials (code,
+Last updated: 2026-10-02 (Exotel media route pass). Read this before adding anything —
+it tracks what's real vs. placeholder, and what happens when client materials (code,
 prompts, scripts, credentials, models) arrive.
+
+## Exotel media WebSocket route (2026-10-02) — built ahead of credentials, found a real routing bug
+
+Preparing for a free Exotel trial signup (see "Real outbound call attempt" and the
+Twilio-trial-blocked finding below) surfaced an architectural difference from Twilio
+worth building for ahead of time: Exotel's Voicebot/Stream applet is configured with a
+URL *once*, at flow-design time in their App Bazaar console — there's no per-call
+dynamic TwiML-equivalent to embed a `call_attempt_id` in, the way `telephony/twilio.py`
+does. Exotel does support a dynamic-HTTPS-URL option (`{"url": "wss://..."}`), but its
+own request parameters aren't documented, so the robust choice — confirmed against
+[Exotel's AgentStream docs](https://developer.exotel.com/docs/agentstream/stream-voicebot-applet) —
+is a **static** WebSocket URL, correlating each connection to our `CallAttempt` via the
+`call_sid` Exotel sends in its own `start` event, matched against the
+`provider_call_id` we stored when `create_outbound_call` returned it.
+
+- `apps/api/routers/media.py` refactored: shared setup logic extracted into
+  `_resolve_attempt_and_build_session()` (resolve by attempt id OR by provider call
+  sid), two thin routes on top of it — `/media/{call_attempt_id}` (Twilio, unchanged
+  behavior) and `/media/exotel` (new, static URL + `call_sid` correlation).
+- **Found a real routing bug via the new tests, not by inspection**: registering
+  `/media/exotel` *after* `/media/{call_attempt_id}` meant Starlette matched
+  `/media/exotel` against the UUID-typed path param first (any single path segment,
+  including the literal "exotel", structurally fits `{call_attempt_id}` before type
+  conversion is attempted) and rejected it for an invalid UUID — the literal route
+  never got a chance. Fixed by registering the specific route first; a dedicated
+  regression test (`test_twilio_route_still_reachable_after_exotel_route_added_first`)
+  guards the ordering.
+- 5 new tests (`tests/unit/test_media_exotel.py`): correlation/rejection paths only (no
+  OpenAI calls, so these run offline) — the "happy path" (a real call_sid resolving to
+  a real CallAttempt and the agent actually speaking) needs a live key and is left to
+  manual verification once real Exotel credentials exist, not a per-run test cost.
+  These are plain `def` tests, not `async def` under pytest-asyncio, and reset the
+  app's DB connection pool before each one — `TestClient.websocket_connect` runs the
+  ASGI app in its own background thread with its own event loop, and asyncpg
+  connections cannot be reused across event loops; nesting it inside pytest-asyncio's
+  loop, or reusing a pooled connection across two different TestClient instances,
+  both reproduce this. A real server has exactly one loop for its whole process
+  lifetime, so neither failure mode is a production concern — purely a testing-infra
+  footgun worth documenting for next time. 74 tests total.
+- **Still unverified** (no Exotel credentials yet): the exact `Calls/connect` API
+  parameters in `telephony/exotel.py:create_outbound_call` for a pure voicebot call
+  (its current shape follows Exotel's "connect two numbers" pattern, which may not be
+  the right call for "ring a lead directly into an automated flow with no second human
+  leg" — flagged, not fixed, since guessing here without a live account to test against
+  would repeat the exact mistake this project has avoided elsewhere). Fix once
+  credentials are in hand, the same live-test-and-adjust approach used for Twilio and
+  the Realtime STT migration.
 
 ## Browser demo (2026-10-01) — a free, no-telephony way to show the real system working
 
