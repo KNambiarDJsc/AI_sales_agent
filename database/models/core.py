@@ -9,7 +9,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -88,8 +88,8 @@ class CallAttempt(Base, UUIDPKMixin, TimestampMixin):
     provider_call_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     status: Mapped[str] = mapped_column(String(30), default="queued", nullable=False, index=True)
     # queued/dialing/ringing/in_progress/completed/failed/no_answer/busy/canceled
-    started_at: Mapped[datetime | None] = mapped_column(nullable=True)
-    ended_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     duration_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
     outcome: Mapped[str | None] = mapped_column(String(50), nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -102,8 +102,8 @@ class Conversation(Base, UUIDPKMixin, TimestampMixin):
     script_id: Mapped[str] = mapped_column(String(100), nullable=False)
     script_version: Mapped[int] = mapped_column(Integer, nullable=False)
     current_state: Mapped[str] = mapped_column(String(50), nullable=False, default="INTRO")
-    started_at: Mapped[datetime | None] = mapped_column(nullable=True)
-    ended_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     ended_reason: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
 
