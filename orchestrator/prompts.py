@@ -55,6 +55,9 @@ def build_system_message(script: ScriptConfig, context: ConversationContext) -> 
         "",
         f"Current conversation state: {context.current_state}",
         f"State objective: {state_cfg.objective}",
+        f"Valid values for 'state' this turn (you MUST pick one of these exactly — "
+        f"usually stay in {context.current_state} unless this turn's objective is "
+        "clearly met): " + ", ".join(sorted(script.allowed_next_states(context.current_state))),
     ]
     if state_cfg.mandatory_questions:
         parts.append("Mandatory questions for this state (ask any not yet answered):")

@@ -7,7 +7,7 @@ plain-dict form the rest of the test suite uses for convenience.
 """
 import json
 
-from orchestrator.schema import AgentResponseProposal, ToolCallProposal
+from orchestrator.schema import AgentResponseProposal, ToolCallProposal, build_agent_response_schema
 from orchestrator.state_machine import ScriptConfig, StateConfig, StateMachine
 from orchestrator.validator import validate_llm_response
 
@@ -92,3 +92,24 @@ def test_full_validator_round_trip_with_real_wire_format():
     assert outcome.proposal.extracted_facts == {"interested_in_amazon_selling": True}
     assert outcome.proposal.tool_call.name == "update_lead"
     assert outcome.proposal.tool_call.arguments == {"business_name": "Rao Textiles"}
+
+
+def test_build_agent_response_schema_constrains_state_to_an_enum():
+    # Regression test for a real bug caught on a live call: `state` had no enum at
+    # all, so the model proposed states that don't exist ("EXPLAIN",
+    # "QUALIFY_INTEREST") and states it couldn't reach yet by skipping ahead (INTRO
+    # straight to QUALIFICATION) - every one got rejected by the validator and fell
+    # back to re-asking the same question, forever, since nothing ever nudged the
+    # model toward a state it could actually transition to.
+    schema = build_agent_response_schema(["INTRO", "PERMISSION", "DO_NOT_CALL", "END"])
+    assert schema["properties"]["state"] == {
+        "type": "string",
+        "enum": ["INTRO", "PERMISSION", "DO_NOT_CALL", "END"],
+    }
+
+
+def test_build_agent_response_schema_does_not_mutate_the_base_schema():
+    from orchestrator.schema import AGENT_RESPONSE_JSON_SCHEMA
+
+    build_agent_response_schema(["INTRO", "END"])
+    assert AGENT_RESPONSE_JSON_SCHEMA["properties"]["state"] == {"type": "string"}

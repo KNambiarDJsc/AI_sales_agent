@@ -76,6 +76,16 @@ class AgentResponseProposal(BaseModel):
 # above by hand rather than via Pydantic's json_schema() export, because OpenAI's
 # strict structured-output mode requires `additionalProperties: false` and fully
 # required fields at every level, which needs a couple of manual tweaks.
+#
+# `state` is intentionally just `{"type": "string"}` here, not an enum — this is the
+# shape used when the caller has no script context (tests, anything not going through
+# build_agent_response_schema below). Real conversation turns must use
+# build_agent_response_schema() instead: leaving `state` unconstrained let the model
+# propose states that don't exist at all (e.g. "EXPLAIN", "QUALIFY_INTEREST") and
+# states it can't reach yet by skipping ahead (INTRO straight to QUALIFICATION) -
+# caught on a live call, where every one of those got rejected by the validator and
+# fell back to the same re-prompt every single turn, looping forever since the model
+# never got to try a state transition the validator would actually accept.
 AGENT_RESPONSE_JSON_SCHEMA: dict = {
     "type": "object",
     "additionalProperties": False,
@@ -111,6 +121,22 @@ AGENT_RESPONSE_JSON_SCHEMA: dict = {
     },
     "required": ["state", "speech", "intent", "extracted_facts", "tool_call", "end_call"],
 }
+
+
+def build_agent_response_schema(allowed_states: list[str]) -> dict:
+    """The real per-turn schema: AGENT_RESPONSE_JSON_SCHEMA with `state` constrained to
+    an enum of exactly the states reachable from wherever the conversation is right
+    now (`ScriptConfig.allowed_next_states(current_state)` — current state + global
+    safety states + this state's own transitions_on targets). OpenAI's strict
+    json_schema mode enforces enum membership at sampling time, so the model cannot
+    hallucinate a nonexistent state name or skip ahead to one it isn't allowed to
+    reach yet — both caught live, both previously only caught after the fact by
+    validator.py, which meant a full wasted turn (and, in the skip-ahead case, the
+    conversation stuck re-asking the same fallback question forever, since every
+    retry proposed the same disallowed skip again)."""
+    schema = json.loads(json.dumps(AGENT_RESPONSE_JSON_SCHEMA))  # cheap deep copy, no extra dependency
+    schema["properties"]["state"] = {"type": "string", "enum": list(allowed_states)}
+    return schema
 
 
 class ValidationOutcome(BaseModel):

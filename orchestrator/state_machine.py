@@ -114,6 +114,9 @@ class StateMachine:
     def is_transition_allowed(self, to_state: str) -> bool:
         return to_state in self.script.allowed_next_states(self.current_state)
 
+    def allowed_next_states(self) -> set[str]:
+        return self.script.allowed_next_states(self.current_state)
+
     def allowed_tools(self) -> set[str]:
         return self.script.allowed_tools(self.current_state)
 

@@ -41,7 +41,7 @@ from database.session import session_scope
 from llm.base import LLMProvider
 from orchestrator.context import ConversationContext
 from orchestrator.prompts import build_messages
-from orchestrator.schema import AGENT_RESPONSE_JSON_SCHEMA, AgentResponseProposal
+from orchestrator.schema import AgentResponseProposal, build_agent_response_schema
 from orchestrator.state_machine import StateMachine
 from orchestrator.streaming import SpeculativeTurnExtractor
 from orchestrator.validator import ValidationOutcome, build_fallback_outcome, validate_llm_response
@@ -153,7 +153,7 @@ class ConversationEngine:
 
         try:
             proposal_raw = await asyncio.wait_for(
-                self._llm.propose(messages, AGENT_RESPONSE_JSON_SCHEMA),
+                self._llm.propose(messages, build_agent_response_schema(sorted(self._state_machine.allowed_next_states()))),
                 timeout=self._settings.llm_timeout_seconds,
             )
         except Exception as exc:  # noqa: BLE001 - any transport failure (incl. timeout) degrades safely
@@ -183,7 +183,9 @@ class ConversationEngine:
 
         async def _consume() -> None:
             nonlocal speech_delivered
-            async for delta in self._llm.propose_stream(messages, AGENT_RESPONSE_JSON_SCHEMA):
+            async for delta in self._llm.propose_stream(
+                messages, build_agent_response_schema(sorted(self._state_machine.allowed_next_states()))
+            ):
                 chunks.append(delta)
                 extractor.feed(delta)
                 if not speech_delivered and extractor.speech_ready:
