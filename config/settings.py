@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     openai_stt_model: str = "gpt-4o-transcribe"
     openai_tts_model: str = "gpt-4o-mini-tts"
     openai_tts_voice: str = "alloy"
-    openai_llm_model: str = "gpt-4o"
+    openai_llm_model: str = "gpt-5.4-mini"
 
     # STT backend: "buffered" (speech/stt/openai.py, REST, per-utterance — reliable,
     # zero surprises) or "realtime" (speech/stt/openai_realtime.py, genuine streaming

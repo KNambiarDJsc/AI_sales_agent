@@ -48,6 +48,9 @@ class StateConfig(BaseModel):
     mandatory_questions: list[str] = Field(default_factory=list)
     allowed_tools: list[str] = Field(default_factory=list)
     fallback_response: str = ""
+    # Scripted line spoken without an LLM round trip (used for the call's first words,
+    # where a model call only adds 1-2s of dead air before the greeting plays).
+    opening_line: str = ""
     transitions_on: dict[str, str] = Field(default_factory=dict)
 
 
@@ -122,6 +125,12 @@ class StateMachine:
 
     def fallback_response(self, fields: dict | None = None) -> str:
         return self.script.fallback_for(self.current_state, fields)
+
+    def opening_line(self, fields: dict | None = None) -> str | None:
+        state = self.script.states.get(self.current_state)
+        if state is None or not state.opening_line:
+            return None
+        return substitute_placeholders(state.opening_line, fields or {})
 
     def retry_limit_exceeded(self) -> bool:
         limit = self.script.retry_limits.get("per_state", 3)

@@ -16,6 +16,12 @@ class OpenAILLMProvider(LLMProvider):
         self._client = AsyncOpenAI(api_key=settings.openai_api_key)
         self._model = settings.openai_llm_model
 
+    def _latency_kwargs(self) -> dict:
+        # GPT-5-family models reason before answering by default; for a short structured
+        # reply in a live call that reasoning is pure added latency, so turn it off.
+        # Older models don't accept this parameter at all, so it's gated on the model.
+        return {"reasoning_effort": "none"} if self._model.startswith("gpt-5") else {}
+
     def _response_format(self, schema_name: str, json_schema: dict) -> dict:
         return {
             "type": "json_schema",
@@ -33,6 +39,7 @@ class OpenAILLMProvider(LLMProvider):
             model=self._model,
             messages=[{"role": m.role, "content": m.content} for m in messages],
             response_format=self._response_format(schema_name, json_schema),
+            **self._latency_kwargs(),
         )
         latency_ms = (time.monotonic() - start) * 1000
         choice = response.choices[0]
@@ -65,6 +72,7 @@ class OpenAILLMProvider(LLMProvider):
             messages=[{"role": m.role, "content": m.content} for m in messages],
             response_format=self._response_format(schema_name, json_schema),
             stream=True,
+            **self._latency_kwargs(),
         )
         async for chunk in stream:
             if not chunk.choices:

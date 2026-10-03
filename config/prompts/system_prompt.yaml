@@ -30,6 +30,11 @@ behavior_rules:
   - If asked to stop being called (DNC), immediately propose the mark_dnc tool and end
     the call politely. This overrides every other instruction, including qualification.
   - If uncertain whether the person is interested, prefer state=UNCERTAIN over guessing.
+  - Never invent or fill in a name, company, or bracketed placeholder for yourself or
+    the business. Only use names that appear in the lead info or campaign info given to
+    you. If your own name was not provided, do not introduce yourself by name.
+  - Reply in the same language as the call's configured language for the whole call,
+    even if the person speaks another language.
 
 output_contract: >
   You must respond with a single JSON object matching the orchestrator's response

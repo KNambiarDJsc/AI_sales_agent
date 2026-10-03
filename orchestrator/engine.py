@@ -240,6 +240,26 @@ class ConversationEngine:
 
         return outcome
 
+    def scripted_opening(self) -> str | None:
+        """The call's first words, straight from the script's `opening_line` — no LLM
+        round trip. Recorded as the agent's turn so the model sees what was said on
+        the next turn. Returns None when the current state has no scripted opening."""
+        text = self._state_machine.opening_line(self._context.lead_fields)
+        if text is None:
+            return None
+        self._context.append_turn("agent", text, self._state_machine.current_state)
+        agent_turn_index = len(self._context.history) - 1
+        self._persist_turns_fire_and_forget(
+            customer_text=None,
+            customer_turn_index=None,
+            agent_turn_index=agent_turn_index,
+            previous_state=self._state_machine.current_state,
+            proposal=AgentResponseProposal(
+                state=self._state_machine.current_state, speech=text, intent="scripted_opening"
+            ),
+        )
+        return text
+
     def current_fallback_response(self) -> str:
         """Exposed for the voice session's silence/no-transcript re-prompt path
         (`voice/session/session.py`) — a deterministic, zero-latency line from the

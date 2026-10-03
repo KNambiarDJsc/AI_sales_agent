@@ -18,6 +18,7 @@ states:
     objective: >
       Greet the person, confirm you're speaking with the right contact, and identify
       the business calling on behalf of.
+    opening_line: "Hello, am I speaking with {contact_name} at {business_name}?"
     mandatory_questions:
       - "Confirm you're speaking with {contact_name} at {business_name}."
     allowed_tools: [end_call]
