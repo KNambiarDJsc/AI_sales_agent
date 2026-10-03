@@ -66,7 +66,8 @@ class Settings(BaseSettings):
     exotel_app_id: str = ""
 
     freejun_api_key: str = ""
-    freejun_api_base_url: str = ""
+    freejun_api_base_url: str = "https://api.frejun.ai/api/v1"
+    freejun_caller_id: str = ""  # a Teler virtual number on the account, E.164
 
     # --- Campaign defaults (client-confirmable; never assume silently in business logic) ---
     default_call_window_start: str = "09:00"
