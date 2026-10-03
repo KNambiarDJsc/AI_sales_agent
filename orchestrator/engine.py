@@ -115,10 +115,16 @@ class ConversationEngine:
             if proposal.tool_call.name in ("end_call", "mark_dnc") and result.success:
                 end_call = True
             if not result.success:
-                logger.warning("tool_call_failed", extra={"tool": proposal.tool_call.name, "message": result.message})
+                # Not "message": that key is reserved on LogRecord, and logging raises
+                # KeyError for it — which turned every failed tool call into a crashed turn.
+                logger.warning("tool_call_failed", extra={"tool": proposal.tool_call.name, "tool_message": result.message})
 
         previous_state = self._state_machine.current_state
         self._state_machine.transition_to(proposal.state)
+        # The prompt is built from the context's state (orchestrator/prompts.py), so it
+        # has to follow the state machine — otherwise every turn's prompt describes
+        # INTRO's objective/questions/tools for the whole call.
+        self._context.current_state = self._state_machine.current_state
         self._context.append_turn("agent", proposal.speech, self._state_machine.current_state)
         agent_turn_index = len(self._context.history) - 1
         self._persist_turns_fire_and_forget(
@@ -140,6 +146,12 @@ class ConversationEngine:
     async def _propose_and_validate(
         self, messages, on_speech_ready: OnSpeechReady | None
     ) -> ValidationOutcome:
+        # One deadline for the whole turn, shared by the streaming attempt and the
+        # plain-path retry. They used to get llm_timeout_seconds each, so a stream that
+        # timed out was retried for the full timeout again — ~17 s of dead air
+        # before the fallback line, seen live.
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._settings.llm_timeout_seconds
         if self._settings.enable_speculative_tts:
             outcome = await self._propose_and_validate_streaming(messages, on_speech_ready)
             if outcome is not None:
@@ -152,9 +164,12 @@ class ConversationEngine:
             # re-run the whole call and risk speaking a second, different response).
 
         try:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise asyncio.TimeoutError("LLM deadline already spent by the streaming attempt")
             proposal_raw = await asyncio.wait_for(
                 self._llm.propose(messages, build_agent_response_schema(sorted(self._state_machine.allowed_next_states()))),
-                timeout=self._settings.llm_timeout_seconds,
+                timeout=remaining,
             )
         except Exception as exc:  # noqa: BLE001 - any transport failure (incl. timeout) degrades safely
             logger.exception("llm_call_failed")
@@ -239,6 +254,10 @@ class ConversationEngine:
             await on_speech_ready(outcome.proposal.speech)
 
         return outcome
+
+    @property
+    def current_state(self) -> str:
+        return self._state_machine.current_state
 
     def current_fallback_response(self) -> str:
         """Exposed for the voice session's silence/no-transcript re-prompt path

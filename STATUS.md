@@ -4,6 +4,94 @@ Last updated: 2026-10-02 (Exotel media route pass). Read this before adding anyt
 it tracks what's real vs. placeholder, and what happens when client materials (code,
 prompts, scripts, credentials, models) arrive.
 
+## Latency + browser demo pass (2026-10-03)
+
+Measured end-to-end in the real `/demo` page (Chrome, push-to-talk; release of the
+button → first agent audio actually playing): **2.5–3.8 s, median ≈2.9 s** over 13
+turns, vs. several seconds more before (the page waited for the *whole* reply to be
+synthesized before playing anything). Per turn ≈ STT 0.7–1.3 s · LLM 0.8–1.6 s · TTS
+first audio 0.8–1.0 s — each at the floor of the fastest model measured for it.
+
+- Models re-chosen by benchmark on this project's prompt/schema (`config/settings.py`
+  has the numbers): LLM gpt-4o → **gpt-4.1-mini** (speech ready 1.96 s → 0.84 s), STT →
+  **gpt-4o-mini-transcribe**, TTS stays gpt-4o-mini-tts (tts-1 was slower). Realtime
+  streaming STT measured only ~0.1 s faster than REST, so the demo keeps REST.
+- One shared, pooled OpenAI client per process (`llm/openai_client.py`); system prompt
+  reordered static-first (prompt-cache friendly); one LLM deadline per turn (a timed-out
+  stream no longer gets a second full timeout — that was the 17 s silence); TTS hands
+  over audio in 25 ms pieces instead of 85 ms.
+- English only: STT pinned to `STT_LANGUAGE=en`, prompt rule to always reply in English
+  (verified: Hindi and Spanish speech both got English replies).
+- Demo rewrite (`apps/api/routers/demo.py`): turns strictly serialised, newest utterance
+  wins, barge-in on button press, streaming playback, accidental clicks/silent
+  recordings discarded, one MediaRecorder per recording (a shared buffer is how two
+  quick presses merged), per-turn timing shown. Verified in Chrome: double press → one
+  reply; barge-in mid-reply → zero overlapping audio; no page errors.
+- Prompt rules (config only): short replies, no invented names/placeholders, don't end
+  the call over a question (the model hung up when asked "who are you calling from?").
+
+**Sub-0.3 s is not reachable with this architecture**: STT, LLM and TTS are three
+sequential network calls, and the fastest models measured for each take ~0.7–0.9 s on
+their own. Options that would go further, each a decision rather than a tweak: stream
+mic audio to realtime STT during the press (~0.1–0.3 s); start TTS on the first sentence
+while the LLM is still writing (changes the engine's one-callback-per-turn contract);
+or a speech-to-speech model (OpenAI Realtime), which typically answers in well under a
+second but speaks before our validator can check the reply — conflicts with "the LLM
+proposes; the application decides" (CLAUDE.md rule 2).
+
+## FreJun (Teler) integration (2026-10-03) — active provider; code path proven, real call blocked on account setup
+
+FreJun/Teler replaces Exotel as the active provider (Exotel code left intact, unused).
+Built from FreJun's official docs (frejun.com/docs/teler/) and official SDK
+(github.com/frejun-tech/teler-py) — every request/message shape in
+`telephony/frejun.py` is traced to one of them. Inbound calls to the Teler number get
+a clean `hangup` from `/flow/frejun/inbound` (the Voice App's required Incoming Call
+URL); only outbound calling is implemented.
+
+**Call path**: worker/`scripts/frejun_call.py call` → `dispatch_next_call` (attempt row
+now committed *before* dialling) → `POST /voice/calls/initiate` (X-API-Key) → callee
+answers → Teler `POST /flow/frejun/{call_attempt_id}` (`apps/api/routers/flows.py`)
+→ we return a `stream` Call Flow → Teler opens `wss://…/media/frejun/{call_attempt_id}`
+(`apps/api/routers/media.py`) → `start` (call_id checked against the attempt) → `audio`
+(base64 PCM16 8 kHz mono) → existing `VoiceSession` pcm16 path → outbound
+`{"type":"audio","audio_b64","chunk_id"}` / `{"type":"clear"}`. Status webhooks: JSON
+to `/webhooks/frejun`, HMAC-SHA256 verified with `FREJUN_SECRET` (5-min replay window).
+Hangup: `POST /voice/calls/{id}/hangup` with `Idempotency-Key`.
+
+**Proven** (not just compiled): `scripts/frejun_call.py check` passes every code-side
+check through the public tunnel (signed/unsigned webhooks, flow JSON, WSS handshake,
+VoiceSession → LLM → TTS → Teler-format audio). `simulate all` ran three real-speech
+calls in FreJun's wire protocol through the tunnel: interested lead went INTRO →
+PERMISSION → DISCOVERY → QUALIFICATION → INTERESTED and recorded `qualified` from real
+facts + quoted evidence; DNC wrote suppression and suppressed the lead; callback stored
+one callback (LLM proposed it twice — now idempotent) and set lead `callback_scheduled`.
+
+**Blocked**: the FreJun account has 0 numbers and 0 Voice Apps (API-verified), so no
+real call can be placed. Needs: a Teler number, a Voice App with that number attached
+(Incoming Call URL `…/flow/frejun/inbound`, Call Status URL `…/webhooks/frejun`), the
+Voice App's webhook secret in `FREJUN_SECRET`, `FREJUN_FROM_NUMBER`.
+
+**Fixed in the same pass** (found live in the browser demo):
+- LLM never saw tool argument schemas or the rules' fact keys → `create_qualification({})`
+  was always rejected. Prompt now renders each allowed tool's Pydantic schema and the
+  fact keys from `config/qualification/rules.yaml` (still validated by the tool/scorer).
+- `schedule_callback` inserted a duplicate row when re-proposed → one pending callback
+  per conversation, updated in place.
+- Leads stayed `in_progress` forever → `services/call_worker/lifecycle.py:finalize_call`
+  (media teardown + terminal webhooks, idempotent): `completed` / `callback_scheduled`
+  / `suppressed` / `failed` (never connected — retry sweep requeues), with
+  `CallAttempt.outcome` and the final conversation state recorded.
+- Earlier: prompt stuck on INTRO, failed tool crashing the turn, browser playback,
+  naive-timestamp columns (callback/export) — see git diff on `naman-development`.
+- Webhook route passed `dict(request.headers)` (lowercased keys), so Twilio's
+  `X-Twilio-Signature` lookup always failed; now passes the case-insensitive headers.
+
+**Known issues, not fixed**: turn latency 3.5–6 s from end of speech to first agent
+audio (buffered STT + LLM + TTS first chunk); replies are long (10–24 s of audio);
+600 ms endpointing cut "Please stop calling me. Remove my number…" at the first
+sentence; placeholder product_info lets the LLM say "[Your Company Name]"; inbound
+calls are hung up, not handled.
+
 ## Exotel media WebSocket route (2026-10-02) — built ahead of credentials, found a real routing bug
 
 Preparing for a free Exotel trial signup (see "Real outbound call attempt" and the
@@ -419,7 +507,8 @@ pass (69 after the browser-demo pass's placeholder-substitution fix, see above).
   Amazon-selling qualification script/rules, not the client's actual script or
   thresholds.
 - `.env.example` — no real credentials anywhere, obviously.
-- `telephony/freejun.py` — interface only, see above.
+- ~~`telephony/freejun.py` — interface only~~ — replaced by a real `telephony/frejun.py`
+  (FreJun/Teler), see the FreJun section at the top.
 - `MAX_ATTEMPTS` in `workers/retry.py`, retry cap in `services/call_worker/dispatch.py`
   — placeholder retry policy, needs client confirmation (Section 19/33).
 - Call window / concurrency / max call duration defaults in `.env.example` and

@@ -42,8 +42,9 @@ prospect wants to sell their product on Amazon/online — but that is campaign
 5. **Provider abstractions stay real abstractions.** `TelephonyProvider`,
    `STTProvider`, `TTSProvider`, `LLMProvider` are the only things application code
    depends on outside of `telephony/`, `speech/`, `llm/` themselves. Don't invent a
-   provider's API from guesswork — `telephony/freejun.py` is the template for "we
-   don't have verified docs yet," not a thing to route around.
+   provider's API from guesswork — `telephony/frejun.py` is the template: every
+   request/message shape in it is traced to FreJun's official docs or SDK. A provider
+   without verified docs gets a stub that raises `NotImplementedError`, not guesses.
 6. **Don't add infrastructure the current scale doesn't need.** No Kafka, Temporal,
    Kubernetes, Redis (yet), self-hosted LLMs, multi-agent architectures, or RAG. A
    Postgres-backed queue with `FOR UPDATE SKIP LOCKED` (`database/repositories/

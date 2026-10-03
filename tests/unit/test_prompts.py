@@ -41,6 +41,35 @@ def test_system_message_lists_valid_next_states_explicitly():
     assert "DO_NOT_CALL" in message.content  # global safety state, always present
 
 
+def test_system_message_gives_tool_argument_schemas_not_just_names():
+    # Regression test for a live finding: the prompt listed tool names only, so the LLM
+    # called create_qualification({}) and the tool (correctly) rejected it for missing
+    # evidence — no qualification was ever recorded in a real conversation.
+    script = load_script_by_id("product-a")
+    message = build_system_message(script, _context(current_state="QUALIFICATION")).content
+    assert "- create_qualification:" in message
+    for field in ("facts (object", "evidence (array", "dimension_confidence (object", "summary ("):
+        assert field in message, field
+    assert "requested_time (" in message  # schedule_callback is allowed here too
+
+
+def test_system_message_lists_the_qualification_fact_keys_from_config():
+    # The scoring engine reads specific fact keys from config/qualification/rules.yaml;
+    # without being told them the LLM invented its own ("product_type") and nothing
+    # could ever qualify.
+    script = load_script_by_id("product-a")
+    message = build_system_message(script, _context(current_state="DISCOVERY")).content
+    for key in ("interested_in_amazon_selling", "sufficient_business_info_captured", "willing_to_be_contacted"):
+        assert key in message
+
+
+def test_system_message_does_not_offer_tools_outside_the_state():
+    script = load_script_by_id("product-a")
+    message = build_system_message(script, _context(current_state="INTRO")).content
+    assert "- create_qualification:" not in message
+    assert "- end_call:" in message and "- mark_dnc:" in message  # global safety tools
+
+
 def test_system_message_falls_back_to_utc_for_an_invalid_timezone():
     # A campaign misconfigured with a bad timezone string must not crash a live call.
     script = load_script_by_id("product-a")

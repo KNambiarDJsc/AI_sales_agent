@@ -16,13 +16,25 @@ from tools.registry import ToolContext, ToolRegistry, ToolResult, ToolSpec
 
 
 class CreateQualificationInput(BaseModel):
-    facts: dict[str, Any] = Field(default_factory=dict)
-    dimension_confidence: dict[str, float] = Field(default_factory=dict)  # need/fit/timing/authority/willingness/evidence -> 0..1
-    objections: list[str] = Field(default_factory=list)
-    evidence: list[str] = Field(default_factory=list)  # quotes/turn references backing the facts
-    summary: str | None = None
-    sales_followup_required: bool = False
-    dnc_requested: bool = False
+    # Descriptions are rendered into the LLM prompt (orchestrator/prompts.py), so they
+    # say what to send, not how it's scored — scoring stays in qualification/scoring.py.
+    facts: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Every qualification fact established so far, using the exact fact keys listed under "
+        "'Qualification facts', e.g. {\"interested_in_amazon_selling\": true}.",
+    )
+    dimension_confidence: dict[str, float] = Field(
+        default_factory=dict,
+        description="Your confidence 0..1 in each qualification dimension listed under 'Qualification facts'.",
+    )
+    objections: list[str] = Field(default_factory=list, description="Objections the customer raised, if any.")
+    evidence: list[str] = Field(
+        default_factory=list,
+        description="Short verbatim customer quotes from this call that back the facts. Required, at least one.",
+    )
+    summary: str | None = Field(default=None, description="One or two sentences summarising the call for the sales team.")
+    sales_followup_required: bool = Field(default=False, description="True if the customer agreed to a sales follow-up.")
+    dnc_requested: bool = Field(default=False, description="True if the customer asked not to be called again.")
 
 
 def _script_id_from_context(ctx: ToolContext) -> str:
@@ -74,6 +86,7 @@ def register(registry: ToolRegistry) -> None:
             name="create_qualification",
             input_model=CreateQualificationInput,
             handler=_handle,
-            description="Record extracted facts/evidence for this call; the qualification outcome is computed by config-driven rules, not by the caller.",
+            description="Record this call's qualification facts and evidence once they are known (call it before ending an "
+            "interested/qualified call). The outcome is computed by the application's rules, not by you.",
         )
     )

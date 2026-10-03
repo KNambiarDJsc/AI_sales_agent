@@ -4,23 +4,29 @@ from __future__ import annotations
 import time
 from collections.abc import AsyncIterator
 
-from openai import AsyncOpenAI
-
 from config.settings import get_settings
 from llm.base import LLMMessage, LLMProposal, LLMProvider
+from llm.openai_client import get_openai_client
 
 
 class OpenAILLMProvider(LLMProvider):
     def __init__(self) -> None:
         settings = get_settings()
-        self._client = AsyncOpenAI(api_key=settings.openai_api_key)
         self._model = settings.openai_llm_model
+        self._reasoning_effort = settings.openai_llm_reasoning_effort
 
-    def _response_format(self, schema_name: str, json_schema: dict) -> dict:
-        return {
-            "type": "json_schema",
-            "json_schema": {"name": schema_name, "schema": json_schema, "strict": True},
+    def _request_kwargs(self, messages: list[LLMMessage], schema_name: str, json_schema: dict) -> dict:
+        kwargs = {
+            "model": self._model,
+            "messages": [{"role": m.role, "content": m.content} for m in messages],
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {"name": schema_name, "schema": json_schema, "strict": True},
+            },
         }
+        if self._reasoning_effort:
+            kwargs["reasoning_effort"] = self._reasoning_effort
+        return kwargs
 
     async def propose(
         self,
@@ -29,10 +35,8 @@ class OpenAILLMProvider(LLMProvider):
         schema_name: str = "agent_response",
     ) -> LLMProposal:
         start = time.monotonic()
-        response = await self._client.chat.completions.create(
-            model=self._model,
-            messages=[{"role": m.role, "content": m.content} for m in messages],
-            response_format=self._response_format(schema_name, json_schema),
+        response = await get_openai_client().chat.completions.create(
+            **self._request_kwargs(messages, schema_name, json_schema)
         )
         latency_ms = (time.monotonic() - start) * 1000
         choice = response.choices[0]
@@ -52,19 +56,10 @@ class OpenAILLMProvider(LLMProvider):
         json_schema: dict,
         schema_name: str = "agent_response",
     ) -> AsyncIterator[str]:
-        # NOTE: streaming `chat.completions` together with strict `json_schema`
-        # structured outputs is supported by the documented API surface, but this
-        # environment has no live API key to smoke-test it against. If deltas never
-        # arrive incrementally in practice (e.g. a future model buffers internally and
-        # emits everything in one chunk), the speculative path in
-        # orchestrator/streaming.py degrades to "ready right at the end" — same
-        # latency as the non-streaming path, not worse. Verify with a real key before
-        # flipping settings.enable_speculative_tts on by default.
-        stream = await self._client.chat.completions.create(
-            model=self._model,
-            messages=[{"role": m.role, "content": m.content} for m in messages],
-            response_format=self._response_format(schema_name, json_schema),
-            stream=True,
+        # Verified against a live key (STATUS.md): streaming yields incremental deltas
+        # alongside strict json_schema, which is what speculative TTS depends on.
+        stream = await get_openai_client().chat.completions.create(
+            **self._request_kwargs(messages, schema_name, json_schema), stream=True
         )
         async for chunk in stream:
             if not chunk.choices:

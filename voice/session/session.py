@@ -104,6 +104,14 @@ class VoiceSession:
     async def start(self) -> None:
         self._stt_stream = await self._stt_provider.start_stream()
 
+    @property
+    def ended(self) -> bool:
+        return self._ended
+
+    @property
+    def conversation_state(self) -> str:
+        return self._engine.current_state
+
     async def speak_opening_line(self) -> None:
         """Kick off the call: the agent speaks first (Section 32's vertical slice —
         greet, identify the business, ask permission). Reuses the normal turn path
@@ -265,7 +273,12 @@ class VoiceSession:
         if turn_result.end_call:
             if self._speaking_task is not None:
                 await self._speaking_task
-            await self._telephony.hangup_call(self._identity.provider_call_id)
+            try:
+                await self._telephony.hangup_call(self._identity.provider_call_id)
+            except Exception:  # noqa: BLE001 - a failed hangup must not crash the media loop
+                # The session still ends below; routes that own their socket close it
+                # once `ended` is set, which ends the stream on the provider side too.
+                logger.exception("hangup_failed", extra={"call_id": self._identity.provider_call_id})
             await self.close()
 
     async def _speak(self, text: str) -> None:

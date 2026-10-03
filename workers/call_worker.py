@@ -35,8 +35,8 @@ async def run_once() -> None:
                     session,
                     campaign,
                     telephony,
-                    media_websocket_base_url=f"{settings.twilio_webhook_base_url.replace('https://', 'wss://')}/media",
-                    status_callback_base_url=f"{settings.twilio_webhook_base_url}/webhooks",
+                    media_websocket_base_url=f"{settings.effective_public_base_url.replace('https://', 'wss://')}/media",
+                    status_callback_base_url=f"{settings.effective_public_base_url}/webhooks",
                 )
                 if not dispatched:
                     break

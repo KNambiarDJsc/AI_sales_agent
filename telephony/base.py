@@ -1,6 +1,6 @@
 """TelephonyProvider abstraction (Section 6).
 
-Every provider (Twilio, Exotel, Freejun, ...) implements this interface. Application
+Every provider (Twilio, Exotel, FreJun, ...) implements this interface. Application
 code never imports a concrete provider directly outside of `telephony/factory.py` —
 that's what keeps provider-specific quirks isolated and lets the call worker/voice
 session stay provider-agnostic.
@@ -37,6 +37,10 @@ class OutboundCallRequest:
     media_websocket_url: str
     status_callback_url: str
     metadata: dict[str, Any] = field(default_factory=dict)
+    # Our CallAttempt id. Providers that fetch call instructions from us after the
+    # callee answers (FreJun's flow_url) embed it in that URL, so the flow and media
+    # requests correlate by our own id rather than racing the provider_call_id write.
+    call_attempt_id: str = ""
 
 
 @dataclass
@@ -116,7 +120,7 @@ class TelephonyProvider(ABC):
     # --- Stream registration (Twilio/Exotel-style media WebSockets) ---
     #
     # Not abstract: providers whose media transport works differently (or that don't
-    # support realtime media at all, like the Freejun stub) don't need to implement
+    # support realtime media at all) don't need to implement
     # these. The WebSocket handler that accepts the provider's media connection calls
     # register_stream() once it knows the provider's stream/call identifiers; send_audio
     # and clear_audio above then address that registered connection.
