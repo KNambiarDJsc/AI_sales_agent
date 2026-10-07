@@ -60,6 +60,7 @@ from orchestrator.state_machine import StateMachine, load_script_by_id
 from services.call_worker.lifecycle import finalize_call
 from speech.stt.factory import get_stt_provider
 from speech.tts.factory import get_tts_provider
+from voice.session.speech_pipeline import synthesize_phrases
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["demo"])
@@ -213,12 +214,22 @@ async def demo_ws(websocket: WebSocket) -> None:
             "tts_backend": getattr(tts_provider, "backend", "?"),
         }
 
-    async def speak(text: str, turn_id: int, timing: dict) -> None:
-        await send_json({"type": "agent_text", "text": text})
+    async def speak(phrases, turn_id: int, timing: dict) -> None:
+        """Plays a reply that may still be being written: each phrase's text is shown
+        and its audio synthesized as soon as the phrase exists."""
+
+        async def shown(source):
+            first_phrase = True
+            async for phrase in source:
+                await send_json({"type": "agent_text" if first_phrase else "agent_text_append", "text": phrase})
+                first_phrase = False
+                yield phrase
+
         await send_json({"type": "audio_start", "sample_rate": tts_provider.sample_rate_hz})
         first = True
+        audio = synthesize_phrases(tts_provider, shown(phrases))
         try:
-            async for chunk in tts_provider.synthesize_stream(text):
+            async for chunk in audio:
                 if first:
                     first = False
                     now = loop.time()
@@ -233,23 +244,25 @@ async def demo_ws(websocket: WebSocket) -> None:
         except Exception as exc:  # noqa: BLE001 - the text is already on screen; don't kill the session over audio
             logger.exception("demo_tts_failed", extra={"turn": turn_id})
             await send_json({"type": "error", "text": "Speech audio failed: " + _problem_text(exc)})
+        finally:
+            await audio.aclose()
         await send_json({"type": "audio_end"})
 
     async def run_turn(turn_id: int, customer_text: str, timing: dict) -> None:
         nonlocal speak_task, call_ended
 
-        async def on_speech_ready(text: str) -> None:
-            # Start speaking and return at once (the engine still has tool calls and
-            # the state transition to finish). Never await TTS here — it would sit
-            # inside the engine's LLM deadline.
+        async def on_speech_stream(phrases) -> None:
+            # Fires with the reply's first phrase while the LLM is still writing the
+            # rest. Start speaking and return at once — never await TTS here (it would
+            # sit inside the engine's LLM deadline).
             nonlocal speak_task
             now = loop.time()
-            timing["llm"] = now - timing.pop("_llm_started_at", now)
+            timing["llm"] = now - timing.pop("_llm_started_at", now)  # time to the first phrase
             timing["_speech_ready_at"] = now
             if turn_id <= muted_up_to:
                 logger.info("demo_reply_muted_by_barge_in", extra={"turn": turn_id})
                 return
-            speak_task = asyncio.create_task(speak(text, turn_id, timing))
+            speak_task = asyncio.create_task(speak(phrases, turn_id, timing))
 
         timing["_llm_started_at"] = loop.time()
         async with session_scope() as turn_session:
@@ -260,7 +273,7 @@ async def demo_ws(websocket: WebSocket) -> None:
                 campaign_id=campaign_id,
                 lead_id=lead_id,
                 conversation_id=conversation_id,
-                on_speech_ready=on_speech_ready,
+                on_speech_stream=on_speech_stream,
             )
         task = speak_task
         if task is not None:
@@ -448,7 +461,7 @@ registerProcessor('pcm-capture', PcmCapture);`;
 let ws, playCtx, micCtx, micStream, captureNode, callEnded = false;
 let rec = null, flushResolve = null;
 let sources = [], nextTime = 0, acceptAudio = false, carry = null, sampleRate = 24000;
-let releaseAt = null, waitingFirstAudio = false, lastTimingEl = null;
+let releaseAt = null, waitingFirstAudio = false, lastTimingEl = null, lastAgentEl = null;
 
 const talkBtn = document.getElementById('talkBtn');
 const startBtn = document.getElementById('startBtn');
@@ -508,7 +521,8 @@ function playChunk(data) {
 function onMessage(event) {
   if (typeof event.data !== 'string') { playChunk(event.data); return; }
   const msg = JSON.parse(event.data);
-  if (msg.type === 'agent_text') { log('agent', msg.text); lastTimingEl = null; }
+  if (msg.type === 'agent_text') { lastAgentEl = log('agent', msg.text); lastTimingEl = null; }
+  else if (msg.type === 'agent_text_append') { if (lastAgentEl) lastAgentEl.textContent += ' ' + msg.text; else lastAgentEl = log('agent', msg.text); }
   else if (msg.type === 'customer_text') { log('customer', msg.text); setStatus('Thinking…'); }
   else if (msg.type === 'info') { log('info', msg.text); if (!rec) setStatus('Your turn — hold to talk'); }
   else if (msg.type === 'error') { log('error', '⚠ ' + msg.text); setStatus(msg.text); }

@@ -66,8 +66,30 @@ def test_system_message_lists_the_qualification_fact_keys_from_config():
 def test_system_message_does_not_offer_tools_outside_the_state():
     script = load_script_by_id("product-a")
     message = build_system_message(script, _context(current_state="INTRO")).content
-    assert "- create_qualification:" not in message
-    assert "- end_call:" in message and "- mark_dnc:" in message  # global safety tools
+    allowed_line = next(line for line in message.splitlines() if line.startswith("Tools you may call this turn"))
+    assert "create_qualification" not in allowed_line
+    assert "end_call" in allowed_line and "mark_dnc" in allowed_line  # global safety tools
+
+
+def test_tool_reference_shows_a_complete_example_for_create_qualification():
+    script = load_script_by_id("product-a")
+    message = build_system_message(script, _context(current_state="QUALIFICATION")).content
+    example_line = next(
+        line for line in message.splitlines()
+        if "example arguments" in line and "interested_in_amazon_selling" in line
+    )
+    assert '"evidence"' in example_line and '"dimension_confidence"' in example_line
+
+
+def test_placeholder_config_values_are_not_shown_to_the_llm_as_text():
+    # Live finding: the template's "PLACEHOLDER: one or two paragraphs describing..."
+    # reached the model verbatim and it said "I'm calling from [Company Name]" on calls.
+    script = load_script_by_id("product-a")
+    context = _context(campaign_prompt={"product_info": "PLACEHOLDER: describe the service", "target_customer": ""})
+    message = build_system_message(script, context).content
+    assert "PLACEHOLDER" not in message  # system_prompt.yaml's identity_disclosure is a placeholder too
+    assert "Campaign product info: not provided yet" in message
+    assert "Target customer: not provided yet" in message
 
 
 def test_system_message_falls_back_to_utc_for_an_invalid_timezone():

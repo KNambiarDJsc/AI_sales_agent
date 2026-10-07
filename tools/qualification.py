@@ -16,6 +16,24 @@ from tools.registry import ToolContext, ToolRegistry, ToolResult, ToolSpec
 
 
 class CreateQualificationInput(BaseModel):
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "facts": {"interested_in_amazon_selling": True, "sufficient_business_info_captured": True,
+                              "willing_to_be_contacted": True},
+                    "dimension_confidence": {"need": 0.8, "fit": 0.7, "timing": 0.6, "authority": 0.8,
+                                             "willingness": 0.9, "evidence": 0.8},
+                    "objections": [],
+                    "evidence": ["I'm really interested in selling on Amazon", "We make handmade soaps"],
+                    "summary": "Makes handmade soaps, not online yet, wants a sales call.",
+                    "sales_followup_required": True,
+                    "dnc_requested": False,
+                }
+            ]
+        }
+    }
+
     # Descriptions are rendered into the LLM prompt (orchestrator/prompts.py), so they
     # say what to send, not how it's scored — scoring stays in qualification/scoring.py.
     facts: dict[str, Any] = Field(

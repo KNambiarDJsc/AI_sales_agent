@@ -32,23 +32,39 @@ def load_campaign_prompt(path: str | Path) -> dict:
         return yaml.safe_load(f)
 
 
+_NOT_PROVIDED = "not provided yet — leave it out of the conversation; never invent it or say a placeholder for it"
+
+
+def _configured(value: object) -> str:
+    """A config value as the LLM should see it. Values the client hasn't supplied yet are
+    marked PLACEHOLDER in config (CLAUDE.md rule 9); handing that text to the model
+    ("PLACEHOLDER: one or two paragraphs describing...") made it speak placeholders
+    such as "[Company Name]" on calls, so it is told plainly that the detail is
+    missing instead."""
+    text = str(value or "").strip()
+    if not text or text.upper().startswith("PLACEHOLDER"):
+        return _NOT_PROVIDED
+    return text
+
+
 def _static_system_text(script: ScriptConfig, context: ConversationContext) -> str:
     """Everything identical on every turn of a call (and across calls of a campaign)."""
     system_prompt = _load_system_prompt()
     parts = [
         system_prompt["role"],
-        f"Identity disclosure requirement: {system_prompt.get('identity_disclosure', 'NOT CONFIRMED')}",
+        f"Identity disclosure requirement: {_configured(system_prompt.get('identity_disclosure'))}",
         "Behavior rules:",
         *[f"- {rule}" for rule in system_prompt.get("behavior_rules", [])],
         "",
-        f"Campaign product info: {context.campaign_prompt.get('product_info', 'NOT PROVIDED')}",
-        f"Target customer: {context.campaign_prompt.get('target_customer', 'NOT PROVIDED')}",
+        f"Campaign product info: {_configured(context.campaign_prompt.get('product_info'))}",
+        f"Target customer: {_configured(context.campaign_prompt.get('target_customer'))}",
         "",
         system_prompt["output_contract"],
     ]
     qualification_block = _qualification_facts_block(script)
     if qualification_block:
         parts.append(qualification_block)
+    parts.append(_tools_reference(script))
     return "\n".join(parts)
 
 
@@ -110,7 +126,10 @@ def _transitions_text(script: ScriptConfig, current_state: str) -> str:
         lines.append("- asked_not_to_be_called → DO_NOT_CALL (only an explicit request; not merely uninterested)")
     if "said_goodbye" not in transitions:
         lines.append("- said_goodbye → END (the customer is ending the conversation)")
-    lines.append(f"- other → {current_state} (stay here: the objective isn't met yet — e.g. a question, an unclear answer)")
+    lines.append(
+        f"- other → {current_state} (stay here: the objective isn't met yet — e.g. the customer answered one "
+        "question and others remain, asked a question, or gave an unclear answer)"
+    )
     return "\n".join(lines)
 
 
@@ -132,29 +151,45 @@ def _describe_property(name: str, prop: dict, required: bool) -> str:
     return text
 
 
-def _tools_block(allowed_tools: list[str]) -> str:
-    """Each allowed tool's real argument schema, generated from its Pydantic input
-    model — the same model the registry validates against (tools/registry.py), so
-    what the LLM is told and what the application accepts can't drift apart. Without
-    this the LLM only ever saw tool *names* and proposed e.g. create_qualification({}),
-    which the tool correctly rejected, so no qualification was ever recorded."""
-    if not allowed_tools:
-        return "Allowed tools in this state: none"
+def _script_tools(script: ScriptConfig) -> list[str]:
+    names = {tool for state in script.states for tool in script.allowed_tools(state)}
+    return sorted(names)
+
+
+def _tools_reference(script: ScriptConfig) -> str:
+    """Every tool the script can use, with its real argument schema (generated from
+    the Pydantic input model the registry validates against, so prompt and validation
+    can't drift apart) and a complete example. Without arguments the LLM proposed
+    create_qualification({}) — always rejected, so no qualification was recorded; small
+    models only filled them in reliably once shown a full example.
+
+    Lives in the static, cached part of the prompt; each turn only names which tools
+    are allowed right now (`_tools_block`)."""
     registry = get_default_registry()
     lines = [
-        "Allowed tools in this state (tool_call.arguments must be a JSON-encoded object with these fields; "
+        "Tools reference (tool_call.arguments must be a JSON-encoded object with these fields; "
         "the application validates it and may refuse):"
     ]
-    for name in allowed_tools:
+    for name in _script_tools(script):
         spec = registry.get(name)
         if spec is None:
             continue
         schema = spec.input_model.model_json_schema()
         required = set(schema.get("required", []))
-        props = [_describe_property(k, v, k in required) for k, v in schema.get("properties", {}).items()]
         lines.append(f"- {name}: {spec.description}")
-        lines.extend(f"    {p}" for p in props)
+        lines.extend(f"    {_describe_property(k, v, k in required)}" for k, v in schema.get("properties", {}).items())
+        for example in schema.get("examples", [])[:1]:
+            lines.append(f"    example arguments: {json.dumps(example, ensure_ascii=False)}")
     return "\n".join(lines)
+
+
+def _tools_block(allowed_tools: list[str]) -> str:
+    if not allowed_tools:
+        return "Tools you may call this turn: none."
+    return (
+        f"Tools you may call this turn: {', '.join(allowed_tools)} (arguments: see Tools reference). "
+        "Any other tool will be refused."
+    )
 
 
 def _qualification_facts_block(script: ScriptConfig) -> str:

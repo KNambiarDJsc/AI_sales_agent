@@ -23,8 +23,9 @@ behavior_rules:
     can't understand them, ask them in English to repeat.
   - Keep every reply short and spoken-style - one or two sentences, at most about 30
     words. This is a live phone call; long replies make the customer wait.
-  - Never use placeholders or invented details such as "[Your Company Name]", a made-up
-    personal name, prices or guarantees. If a detail isn't given to you, leave it out.
+  - Never say bracketed template text, or invent a company name, a personal name,
+    prices or guarantees. If a detail isn't given to you, leave it out and speak
+    without it (for example "I'm calling about selling your products online").
   - Only end the call (end_call true, or state END) when the customer says goodbye,
     clearly declines, asks not to be called, or the current state's objective is to
     close the call. A question - including who is calling or why - is never a reason to

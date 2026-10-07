@@ -1,8 +1,71 @@
 # Status
 
-Last updated: 2026-10-02 (Exotel media route pass). Read this before adding anything —
+Last updated: 2026-10-07 (real-time speech + local tuning pass). Read this before adding anything —
 it tracks what's real vs. placeholder, and what happens when client materials (code,
 prompts, scripts, credentials, models) arrive.
+
+## Real-time speech + local tuning (2026-10-07, branch `naman-experiment`)
+
+**Speech starts while the LLM is still writing.** The engine hands the voice layer
+an async iterator of phrases the moment the reply's first phrase exists
+(`run_turn(on_speech_stream=...)`, `orchestrator/engine.py:_SpeechDelivery`,
+`orchestrator/streaming.py:PhraseSplitter` / `extract_partial_json_string`); TTS for
+each phrase is pipelined in order (`voice/session/speech_pipeline.py`). Used by both
+the phone path (`VoiceSession`) and `/demo` (text appears phrase by phrase).
+CLAUDE.md rule 10 was changed for this with the owner's approval: speech still
+*starts* exactly once per turn, phrases are always a prefix of the final speech, and
+they are only released after the reply's `state` passed the transition check.
+Measured within the same local LLM calls (4 scripted calls, 12–14 customer turns,
+several runs): speech starts a median **0.4–1.1 s earlier per turn** (max 1.4–2.6 s);
+10–13 of 13–14 replies were split into 2+ phrases. OpenAI-path gain not measured
+here (key currently invalid).
+
+**Measuring on the dev laptop — read before trusting any absolute number.** On
+battery this laptop runs Windows' "Best power efficiency" mode (plugged in: "Best
+performance"), and the browser was holding ~16 GB of private memory (0.3–0.7 GB RAM
+free, page file 51/52 GB committed). In that state every local stage was 5–10x
+slower than the table below (Kokoro 2.3–5.3 s per short phrase, Moonshine 1.3–5 s,
+end-to-end 8.9–16.3 s in `/demo`). Re-measure plugged in, with other apps closed.
+
+Other changes in this pass:
+- **Kokoro threads** (`LOCAL_TTS_THREADS`, default 4): on this hybrid CPU (4
+  performance + 4 low-power cores) all 8 threads were the slowest — 3.5–5.3 s vs
+  2.3–3.0 s with 4 for the same phrase. Set 0 (all cores) on a server with uniform cores.
+- **Placeholder config is no longer shown to the LLM as text**: values still marked
+  `PLACEHOLDER` in config (product info, identity disclosure — CLAUDE.md rule 9) are
+  passed as "not provided yet — leave it out" (`orchestrator/prompts.py:_configured`).
+  The model was saying "I'm calling from [Company Name]" on calls. Reduced, not gone
+  with the local model (1 in ~5 calls still said it; once it said "an Amazon sales
+  team"). Real fix: the client's product info / company name in the campaign prompt.
+- QUALIFICATION's transition labels renamed `qualified` → `agreed_to_sales_followup`,
+  `wants_callback` → `busy_call_back_later` (a "yes" to the state's own "follow-up
+  call from our sales team?" question read as wanting a callback). Same targets.
+- Tool reference in the prompt now includes a complete example per tool (from the
+  Pydantic models): the local model now fills `schedule_callback.requested_time`
+  with a correctly resolved absolute time (seen: "tomorrow at 8 am" →
+  `2026-10-08T08:00:00+05:30`).
+- `local_llm_num_ctx` 6144 (was 8192): smaller KV cache on a memory-starved machine.
+
+Tried and **not** kept (measured worse or no better):
+- Sending the per-turn context in place for Ollama. Ollama's Llama 3 template joins
+  every system message into the top system block, so the history after it is re-read
+  each turn (llama.cpp's prefix cache itself works — verified directly). In place (as a
+  marked user-turn block) was no faster on normal-length calls and gave slightly
+  worse replies; documented in `llm/ollama.py`.
+- Renaming the generic "other" intent and listing it first (1/4 vs 3/4).
+- Ollama's JSON-schema grammar is *not* a latency cost (same first-token time with
+  and without `format`).
+
+Model comparison finished: phi4-mini 0/4 (5.5 s), gemma3:4b 0/4 (7.3 s, timeouts) —
+llama3.2:3b stays. The rejected models were deleted from Ollama (~12.6 GB), and the
+unused PyTorch speech packages (`kokoro`, `moonshine`, torch, transformers, spaCy …)
+were removed from the venv (1.79 → 1.13 GB); the ONNX versions are what the code uses.
+
+**Still open (local LLM)**: the interested-lead call reaches QUALIFICATION but the 3B
+model then classifies the customer's product answer as `wants_more_info`, so the call
+ends in UNCERTAIN (flagged for human review) without a qualification row. Callback,
+not-interested and DNC calls pass. OpenAI remains the primary brain; the local stack
+is the backup that keeps calls alive and safe.
 
 ## Local AI backup — works without an OpenAI key (2026-10-07)
 
@@ -27,8 +90,8 @@ change this — re-run the model comparison there.
 
 LLM chosen by running four scripted calls through the real engine: llama3.2:3b 3/4
 (2.2 s median); qwen2.5:1.5b and qwen3:1.7b 2/4; qwen3:4b 2/4 at ~3.8 s; qwen2.5:3b
-excluded (research-only licence). phi4-mini and gemma3:4b were downloaded but their
-run was stopped by the OS for low memory — not yet compared.
+excluded (research-only licence). phi4-mini 0/4 and gemma3:4b 0/4 (see the section
+above).
 
 Guardrails added because small local models broke them (all config-driven, all
 apply to every backend unless noted, all tested):
@@ -50,9 +113,8 @@ apply to every backend unless noted, all tested):
 Also: the browser demo now captures raw 16 kHz PCM (AudioWorklet) instead of webm —
 what both STT backends take, and no encode/decode step.
 
-**Known gaps (local backend)**: the local LLM sends `create_qualification` with empty
-arguments, so qualification isn't recorded on the local path; it repeats itself more
-than OpenAI; latency above. Note `pip install moonshine` is an unrelated satellite-
+**Known gaps (local backend)**: qualification isn't recorded on the local path (see
+"Still open" above); it repeats itself more than OpenAI; latency above. Note `pip install moonshine` is an unrelated satellite-
 imagery package — the speech model is `useful-moonshine-onnx`.
 
 ## Latency + browser demo pass (2026-10-03)

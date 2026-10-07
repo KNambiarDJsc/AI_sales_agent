@@ -15,6 +15,14 @@ from tools.registry import ToolContext, ToolRegistry, ToolResult, ToolSpec
 
 
 class ScheduleCallbackInput(BaseModel):
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {"requested_time": "2026-10-08T08:00:00+05:30", "timezone": "Asia/Kolkata", "notes": "Prefers mornings."}
+            ]
+        }
+    }
+
     requested_time: datetime | None = Field(
         default=None, description="Absolute ISO 8601 datetime with UTC offset, e.g. 2026-10-03T08:00:00+05:30."
     )

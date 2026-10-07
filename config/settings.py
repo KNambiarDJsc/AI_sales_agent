@@ -73,7 +73,10 @@ class Settings(BaseSettings):
     # do-not-call; qwen3:4b 2/4 at ~3.8 s. qwen2.5:3b's licence is research-only (not for
     # client use). Bigger/faster hardware: re-run the comparison before changing this.
     local_llm_model: str = "llama3.2:3b"
-    local_llm_num_ctx: int = 8192  # Ollama's default would silently truncate long calls
+    # Ollama's own default would silently drop the start of the prompt (the system
+    # prompt) on long calls. 6144 tokens ≈ a 40-turn call; larger costs memory (the
+    # KV cache: ~0.9 GB at 8192 for a 3B model) on machines that have little to spare.
+    local_llm_num_ctx: int = 6144
     # Reasoning ("thinking") models such as qwen3 think before answering unless told
     # not to — seconds of silence on a phone call. False turns it off; None sends
     # nothing (for models without a thinking mode).
@@ -88,6 +91,12 @@ class Settings(BaseSettings):
     local_tts_voice: str = "af_heart"
     local_tts_lang: str = "en-us"
     local_tts_speed: float = 1.0
+    # CPU threads for Kokoro (0 = ONNX Runtime's default: every core). On a hybrid CPU
+    # the slow efficiency cores hold every step back; measured on the dev laptop (Core
+    # Ultra 7 256V: 4 performance + 4 low-power cores, on battery) a short phrase took
+    # 3.5-5.3 s with all 8 threads and 2.3-3.0 s with 4. On a server with uniform cores,
+    # set 0.
+    local_tts_threads: int = 4
     # Local STT: Moonshine ONNX (useful-moonshine-onnx). Measured: base 0.23 s / 0.78 s /
     # 1.09 s for 1.5 / 6 / 8 s of speech; tiny ~2x faster but less accurate.
     local_stt_model: Literal["tiny", "base"] = "base"

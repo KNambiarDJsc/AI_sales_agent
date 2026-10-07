@@ -68,9 +68,13 @@ states:
       - "Would you be open to a follow-up call from our sales team to discuss this further?"
     allowed_tools: [update_lead, create_qualification, schedule_callback, end_call]
     fallback_response: "Could you tell me a bit more about the product you'd want to sell?"
+    # Labels are what the LLM picks as `intent`, so they name what the *customer* did.
+    # They were "qualified" / "wants_callback": a "yes" to this state's own question
+    # ("open to a follow-up call from our sales team?") is literally wanting a call,
+    # and was classified as wants_callback (seen with the local model).
     transitions_on:
-      qualified: INTERESTED
-      wants_callback: CALLBACK
+      agreed_to_sales_followup: INTERESTED
+      busy_call_back_later: CALLBACK
       wants_more_info: UNCERTAIN
       not_interested: NOT_INTERESTED
 

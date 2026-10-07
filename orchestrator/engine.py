@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from uuid import UUID
 
@@ -43,13 +43,83 @@ from orchestrator.context import ConversationContext
 from orchestrator.prompts import build_messages
 from orchestrator.schema import AgentResponseProposal, ToolCallProposal, build_agent_response_schema
 from orchestrator.state_machine import StateMachine
-from orchestrator.streaming import SpeculativeTurnExtractor
+from orchestrator.streaming import PhraseSplitter, SpeculativeTurnExtractor
 from orchestrator.validator import ValidationOutcome, build_fallback_outcome, validate_llm_response
 from tools.registry import ToolContext, ToolRegistry, get_default_registry
 
 logger = logging.getLogger(__name__)
 
 OnSpeechReady = Callable[[str], Awaitable[None]]
+OnSpeechStream = Callable[[AsyncIterator[str]], Awaitable[None]]
+
+
+class _SpeechDelivery:
+    """Hands one turn's speech to the caller exactly once (CLAUDE.md rule 10).
+
+    With an `on_speech_stream` callback, speech is a stream of phrases: the callback
+    fires once, with the first phrase, and later phrases are pushed into the same
+    iterator as the LLM writes them; the iterator ends when the reply's speech is
+    complete (or the LLM stream dies — then it ends at what was already said).
+    Otherwise `on_speech_ready` fires once with the whole text. Every path that speaks
+    in the engine goes through `whole()` or `piece()`, so double speech is a
+    RuntimeError here rather than two voices on a call."""
+
+    def __init__(self, on_speech_ready: OnSpeechReady | None, on_speech_stream: OnSpeechStream | None) -> None:
+        self._ready = on_speech_ready
+        self._stream = on_speech_stream
+        self._queue: asyncio.Queue[str | None] | None = None
+        self.started = False
+        self.closed = False
+        self._spoken: list[str] = []
+
+    @property
+    def streaming(self) -> bool:
+        return self._stream is not None
+
+    @property
+    def spoken_text(self) -> str:
+        return " ".join(self._spoken)
+
+    async def _open_stream(self) -> None:
+        queue: asyncio.Queue[str | None] = asyncio.Queue()
+        self._queue = queue
+
+        async def phrases() -> AsyncIterator[str]:
+            while True:
+                item = await queue.get()
+                if item is None:
+                    return
+                yield item
+
+        self.started = True
+        await self._stream(phrases())
+
+    async def whole(self, text: str) -> None:
+        if self.started:
+            raise RuntimeError("speech was already delivered for this turn")
+        if self._stream is not None:
+            await self._open_stream()
+            self._spoken.append(text)
+            self._queue.put_nowait(text)
+            self.close()
+            return
+        self.started = True
+        self._spoken.append(text)
+        if self._ready is not None:
+            await self._ready(text)
+
+    async def piece(self, text: str) -> None:
+        if self.closed:
+            raise RuntimeError("speech stream already ended for this turn")
+        if not self.started:
+            await self._open_stream()
+        self._spoken.append(text)
+        self._queue.put_nowait(text)
+
+    def close(self) -> None:
+        if self._queue is not None and not self.closed:
+            self.closed = True
+            self._queue.put_nowait(None)
 
 
 @dataclass
@@ -85,7 +155,14 @@ class ConversationEngine:
         lead_id: UUID,
         conversation_id: UUID,
         on_speech_ready: OnSpeechReady | None = None,
+        on_speech_stream: OnSpeechStream | None = None,
     ) -> TurnResult:
+        """Speech reaches the caller exactly once per turn (CLAUDE.md rule 10), in one
+        of two forms: `on_speech_stream(phrases)` — an async iterator of phrases,
+        handed over as soon as the first phrase of the reply is written, so speech can
+        start while the LLM is still writing — or, if only `on_speech_ready` is given,
+        the whole text once it is complete. Either callback must only *start* playback
+        and return; it must not wait for audio."""
         customer_turn_index: int | None = None
         if customer_text.strip():
             self._context.append_turn("customer", customer_text, self._state_machine.current_state)
@@ -95,12 +172,15 @@ class ConversationEngine:
             return await self._handle_dnc_request(
                 session=session, tenant_id=tenant_id, campaign_id=campaign_id, lead_id=lead_id,
                 conversation_id=conversation_id, customer_text=customer_text,
-                customer_turn_index=customer_turn_index, on_speech_ready=on_speech_ready,
+                customer_turn_index=customer_turn_index,
+                delivery=_SpeechDelivery(on_speech_ready, on_speech_stream),
             )
 
         customer_spoke = customer_turn_index is not None
         messages = build_messages(self._state_machine.script, self._context)
-        outcome = await self._propose_and_validate(messages, on_speech_ready, self._turn_schema(customer_spoke))
+        outcome = await self._propose_and_validate(
+            messages, on_speech_ready, self._turn_schema(customer_spoke), on_speech_stream
+        )
         proposal = outcome.proposal
         if not customer_spoke and (
             proposal.state != self._state_machine.current_state or proposal.tool_call is not None or proposal.end_call
@@ -200,7 +280,7 @@ class ConversationEngine:
         conversation_id: UUID,
         customer_text: str,
         customer_turn_index: int,
-        on_speech_ready: OnSpeechReady | None,
+        delivery: "_SpeechDelivery",
     ) -> TurnResult:
         """DNC backstop (CLAUDE.md rule 3): the customer used a configured do-not-call
         phrase, so the application handles the turn itself instead of trusting the LLM
@@ -209,8 +289,7 @@ class ConversationEngine:
         records the suppression and ends the call."""
         script = self._state_machine.script
         speech = script.fallback_for("DO_NOT_CALL", self._context.lead_fields)
-        if on_speech_ready is not None:
-            await on_speech_ready(speech)
+        await delivery.whole(speech)
 
         ctx = ToolContext(
             session=session,
@@ -261,9 +340,14 @@ class ConversationEngine:
         )
 
     async def _propose_and_validate(
-        self, messages, on_speech_ready: OnSpeechReady | None, schema: dict | None = None
+        self,
+        messages,
+        on_speech_ready: OnSpeechReady | None = None,
+        schema: dict | None = None,
+        on_speech_stream: OnSpeechStream | None = None,
     ) -> ValidationOutcome:
         schema = schema or self._turn_schema()
+        delivery = _SpeechDelivery(on_speech_ready, on_speech_stream)
         # One deadline for the whole turn, shared by the streaming attempt and the
         # plain-path retry. They used to get llm_timeout_seconds each, so a stream that
         # timed out was retried for the full timeout again — ~17 s of dead air
@@ -271,7 +355,7 @@ class ConversationEngine:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self._settings.llm_timeout_seconds
         if self._settings.enable_speculative_tts:
-            outcome = await self._propose_and_validate_streaming(messages, on_speech_ready, schema)
+            outcome = await self._propose_and_validate_streaming(messages, delivery, schema)
             if outcome is not None:
                 return outcome
             # `None` means the streaming attempt failed before anything was spoken —
@@ -292,58 +376,64 @@ class ConversationEngine:
         except Exception as exc:  # noqa: BLE001 - any transport failure (incl. timeout) degrades safely
             logger.exception("llm_call_failed")
             outcome = build_fallback_outcome(self._state_machine, f"LLM call failed: {exc}", self._context.lead_fields)
-            if on_speech_ready is not None:
-                await on_speech_ready(outcome.proposal.speech)
+            await delivery.whole(outcome.proposal.speech)
             return outcome
 
         outcome = validate_llm_response(proposal_raw.raw_text, self._state_machine, self._context.lead_fields)
-        if on_speech_ready is not None:
-            await on_speech_ready(outcome.proposal.speech)
+        await delivery.whole(outcome.proposal.speech)
         return outcome
 
     async def _propose_and_validate_streaming(
-        self, messages, on_speech_ready: OnSpeechReady | None, schema: dict | None = None
+        self, messages, delivery: "_SpeechDelivery", schema: dict | None = None
     ) -> ValidationOutcome | None:
         """Returns None only when it is safe for the caller to retry from scratch via
-        the plain non-streaming path — i.e. only when `on_speech_ready` was never
-        called. In every other case, by the time this returns, `on_speech_ready` has
-        already been called exactly once (if one was given) — the caller must not
-        call it again, which is exactly why `_propose_and_validate` treats a non-None
-        return here as final rather than falling through."""
+        the plain non-streaming path — i.e. only when no speech was handed over yet.
+        In every other case, by the time this returns, speech has been delivered
+        exactly once — the caller must not deliver it again, which is exactly why
+        `_propose_and_validate` treats a non-None return here as final rather than
+        falling through."""
         extractor = SpeculativeTurnExtractor(self._state_machine)
+        splitter = PhraseSplitter()
         chunks: list[str] = []
-        speech_delivered = False
 
         async def _consume() -> None:
-            nonlocal speech_delivered
             async for delta in self._llm.propose_stream(messages, schema or self._turn_schema()):
                 chunks.append(delta)
                 extractor.feed(delta)
-                if not speech_delivered and extractor.speech_ready:
-                    speech_delivered = True
-                    if on_speech_ready is not None:
-                        await on_speech_ready(extractor.speech)
+                if delivery.streaming:
+                    # Hand each phrase over the moment it is complete — only ever
+                    # after `state` passed the transition check (the extractor gates
+                    # `partial_speech` on it), exactly like the whole-text path.
+                    if extractor.partial_speech is not None and not delivery.closed:
+                        for phrase in splitter.feed(extractor.partial_speech, final=extractor.speech_ready):
+                            await delivery.piece(phrase)
+                        if extractor.speech_ready and delivery.started:
+                            delivery.close()
+                elif not delivery.started and extractor.speech_ready:
+                    await delivery.whole(extractor.speech)
 
         stream_error: BaseException | None = None
         try:
             await asyncio.wait_for(_consume(), timeout=self._settings.llm_timeout_seconds)
         except asyncio.TimeoutError as exc:
-            logger.warning("llm_stream_timeout", extra={"speech_already_delivered": speech_delivered})
+            logger.warning("llm_stream_timeout", extra={"speech_already_delivered": delivery.started})
             stream_error = exc
         except Exception as exc:  # noqa: BLE001 - any transport failure degrades safely below
             logger.exception("speculative_tts_stream_error")
             stream_error = exc
 
+        speech_delivered = delivery.started
         if stream_error is not None:
             if not speech_delivered:
                 return None  # nothing spoken yet — safe for the caller to retry via the plain path
+            delivery.close()  # end the phrase stream at whatever the customer has heard
             # Speech already played under a state we'd already confirmed reachable —
             # stay consistent with what the customer heard by transitioning there
             # rather than silently discarding it. We just never saw the
             # tool_call/extracted_facts that would have come later in the stream.
             proposal = AgentResponseProposal(
                 state=extractor.state or self._state_machine.current_state,
-                speech=extractor.speech or "",
+                speech=delivery.spoken_text,
                 intent="unknown",
                 extracted_facts={},
                 tool_call=None,
@@ -356,18 +446,19 @@ class ConversationEngine:
         raw_text = "".join(chunks)
         outcome = validate_llm_response(raw_text, self._state_machine, self._context.lead_fields)
 
-        if speech_delivered and outcome.proposal.speech != extractor.speech:
-            # Should be structurally impossible (the extractor only reads substrings
-            # of the same raw_text the validator re-parses) — if it ever happens,
-            # something upstream changed shape. Log loudly; the customer already
-            # heard `extractor.speech`, so we do NOT re-speak or contradict it here.
-            logger.error(
-                "speculative_tts_mismatch",
-                extra={"spoken": extractor.speech, "validated": outcome.proposal.speech},
-            )
-
-        if not speech_delivered and on_speech_ready is not None:
-            await on_speech_ready(outcome.proposal.speech)
+        if speech_delivered:
+            delivery.close()
+            if " ".join(outcome.proposal.speech.split()) != " ".join(delivery.spoken_text.split()):
+                # Should be structurally impossible (the extractor only reads
+                # substrings of the same raw_text the validator re-parses) — if it ever
+                # happens, something upstream changed shape. Log loudly; the customer
+                # already heard it, so we do NOT re-speak or contradict it here.
+                logger.error(
+                    "speculative_tts_mismatch",
+                    extra={"spoken": delivery.spoken_text, "validated": outcome.proposal.speech},
+                )
+        else:
+            await delivery.whole(outcome.proposal.speech)
 
         return outcome
 

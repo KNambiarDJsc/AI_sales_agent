@@ -26,6 +26,14 @@ from llm.base import LLMMessage, LLMProposal, LLMProvider
 # engine's LLM deadline on exactly the turn where OpenAI just failed.
 KEEP_ALIVE = "24h"
 
+# Known and measured (2026-10-07): Ollama's Llama 3 template joins every system message
+# into the system block at the top, so the engine's per-turn context message
+# (orchestrator/prompts.py:build_messages) doesn't stay next to the customer's line
+# here, and the history after it is re-read each turn. Sending it in place, as a marked
+# block in the user turn, was tested: no faster on calls of normal length and slightly
+# worse replies with llama3.2:3b (fallbacks, a repeated line), so messages are sent
+# unchanged. Revisit if long calls get slow on the local model.
+
 
 class OllamaLLMProvider(LLMProvider):
     backend = "local"

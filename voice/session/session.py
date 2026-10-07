@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from uuid import UUID
 
@@ -41,6 +42,7 @@ from voice.audio.processing import (
     tts_pcm16_to_telephony_pcm16,
 )
 from voice.session.sentence_split import split_into_speech_chunks
+from voice.session.speech_pipeline import phrases_from, synthesize_phrases
 from voice.turn_taking.turn_taking import TurnEvent, TurnTaker
 from voice.vad.vad import VoiceActivityDetector
 
@@ -246,17 +248,21 @@ class VoiceSession:
         self._first_frame_sent_at = None  # reset; _speak() sets this once real audio goes out
         self._speaking_task = asyncio.create_task(self._speak(text))
 
+    def _start_speaking_phrases(self, phrases: AsyncIterator[str]) -> None:
+        self._first_frame_sent_at = None
+        self._speaking_task = asyncio.create_task(self._speak_phrases(phrases))
+
     async def _run_agent_turn(self, customer_text: str) -> None:
         turn_start = asyncio.get_event_loop().time()
 
-        async def on_speech_ready(speech: str) -> None:
-            # Fires as soon as the engine knows what to say — potentially before tool
-            # execution for this turn has even started (see orchestrator/engine.py) —
-            # so audio starts reaching the customer without waiting on a DB round trip.
+        async def on_speech_stream(phrases: AsyncIterator[str]) -> None:
+            # Fires with the reply's first phrase, while the LLM is still writing the
+            # rest (see orchestrator/engine.py) — speaking starts now, and later
+            # phrases flow into the same playback as they're written.
             logger.info(
-                "turn_timing_llm_proposal", extra={"seconds": round(asyncio.get_event_loop().time() - turn_start, 3)}
+                "turn_timing_first_phrase", extra={"seconds": round(asyncio.get_event_loop().time() - turn_start, 3)}
             )
-            self._start_speaking(speech)
+            self._start_speaking_phrases(phrases)
 
         async with self._session_factory() as session:
             turn_result = await self._engine.run_turn(
@@ -266,7 +272,7 @@ class VoiceSession:
                 campaign_id=self._identity.campaign_id,
                 lead_id=self._identity.lead_id,
                 conversation_id=self._identity.conversation_id,
-                on_speech_ready=on_speech_ready,
+                on_speech_stream=on_speech_stream,
             )
 
         if turn_result.end_call:
@@ -283,24 +289,17 @@ class VoiceSession:
     async def _speak(self, text: str) -> None:
         """Synthesizes and sends `text`, split into sentence-ish chunks whose TTS
         synthesis runs concurrently (`settings.enable_tts_sentence_pipelining`): every
-        chunk's OpenAI request starts right away rather than waiting for the previous
-        chunk to fully finish, so by the time chunk 1 has finished playing, chunk 2 is
-        usually already partway (or fully) synthesized instead of starting cold."""
+        chunk's request starts right away rather than waiting for the previous chunk to
+        fully finish, so by the time chunk 1 has finished playing, chunk 2 is usually
+        already partway (or fully) synthesized instead of starting cold."""
         chunks = split_into_speech_chunks(text) if self._settings.enable_tts_sentence_pipelining else [text]
-        if not chunks:
-            return
+        if chunks:
+            await self._speak_phrases(phrases_from(chunks))
 
-        queues: list[asyncio.Queue] = [asyncio.Queue(maxsize=16) for _ in chunks]
-
-        async def _produce(chunk_text: str, queue: asyncio.Queue) -> None:
-            try:
-                async for pcm16_chunk in self._tts_provider.synthesize_stream(chunk_text):
-                    await queue.put(pcm16_chunk)
-            finally:
-                await queue.put(None)  # sentinel: this chunk is done (or failed)
-
-        producer_tasks = [asyncio.create_task(_produce(chunk_text, queue)) for chunk_text, queue in zip(chunks, queues)]
-
+    async def _speak_phrases(self, phrases: AsyncIterator[str]) -> None:
+        """Sends the audio for `phrases` (which may still be arriving — see
+        `_run_agent_turn`), synthesizing each as soon as it exists
+        (`voice/session/speech_pipeline.py`) and pacing frames in real time."""
         bytes_per_sample = 1 if self._audio_encoding == "mulaw" else 2
         loop = asyncio.get_event_loop()
         next_send_time = loop.time()
@@ -333,34 +332,29 @@ class VoiceSession:
             duration_s = (len(frame) / bytes_per_sample) / TELEPHONY_SAMPLE_RATE_HZ
             next_send_time = send_time + duration_s
 
+        audio = synthesize_phrases(self._tts_provider, phrases)
         try:
             frame_chunker = FrameChunker(
                 frame_bytes=outbound_frame_bytes(self._settings.outbound_frame_ms, bytes_per_sample=bytes_per_sample)
             )
-            for queue in queues:
-                while True:
-                    item = await queue.get()
-                    if item is None:
-                        break
-                    tts_rate = self._tts_provider.sample_rate_hz
-                    if self._audio_encoding == "mulaw":
-                        telephony_frame = tts_pcm16_to_telephony_frame(item, tts_rate, self._resample_out)
-                    else:
-                        telephony_frame = tts_pcm16_to_telephony_pcm16(item, tts_rate, self._resample_out)
-                    for frame in frame_chunker.push(telephony_frame):
-                        await _send_paced(frame)
+            tts_rate = self._tts_provider.sample_rate_hz
+            async for item in audio:
+                if self._audio_encoding == "mulaw":
+                    telephony_frame = tts_pcm16_to_telephony_frame(item, tts_rate, self._resample_out)
+                else:
+                    telephony_frame = tts_pcm16_to_telephony_pcm16(item, tts_rate, self._resample_out)
+                for frame in frame_chunker.push(telephony_frame):
+                    await _send_paced(frame)
             remainder = frame_chunker.flush()
             if remainder:
                 await _send_paced(remainder)
         except asyncio.CancelledError:
             logger.info("tts_playback_cancelled", extra={"call_id": self._identity.provider_call_id})
             raise
+        except Exception:  # noqa: BLE001 - a failed synthesis must not take the call down
+            logger.exception("tts_playback_failed", extra={"call_id": self._identity.provider_call_id})
         finally:
-            for task in producer_tasks:
-                task.cancel()
-            for task in producer_tasks:
-                with contextlib.suppress(asyncio.CancelledError, Exception):
-                    await task
+            await audio.aclose()  # cancels any synthesis still in flight
 
     async def close(self) -> None:
         self._ended = True

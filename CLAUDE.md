@@ -61,16 +61,27 @@ prospect wants to sell their product on Amazon/online — but that is campaign
    call windows, retry caps, identity disclosure policy, CRM choice) are marked exactly
    that in `STATUS.md` and inline comments — do not quietly firm them up without the
    client confirming.
-10. **The speech callback fires exactly once per turn — never zero, never twice.**
-    `orchestrator/engine.py:run_turn`'s `on_speech_ready` contract is load-bearing: the
-    voice session starts a TTS/telephony task the instant it fires, so calling it twice
-    means the agent audibly says two different things for one turn, and never calling
-    it means dead air. If you touch `_propose_and_validate`/`_propose_and_validate_streaming`,
-    re-run `tests/unit/test_engine_streaming.py` — it specifically covers the "already
-    spoke, then the stream died" and "nothing spoken yet, fall back to the plain path"
-    branches. Never let a tool call's DB round trip sit between the LLM response
-    resolving and this callback firing — that reintroduces the latency this was built
-    to remove.
+10. **Speech starts exactly once per turn — never zero, never twice.**
+    `orchestrator/engine.py:run_turn` hands speech over in one of two forms, and exactly
+    one of them fires once: `on_speech_stream(phrases)` (an async iterator of phrases,
+    handed over with the reply's *first phrase* so TTS starts while the LLM is still
+    writing — approved 2026-10-07) or, if only `on_speech_ready` is given,
+    `on_speech_ready(text)` with the whole reply. The phrases are always in order and
+    together form a prefix of the turn's final speech; the iterator ends when the
+    reply's speech is complete, or at what was already said if the LLM stream dies.
+    The voice session starts a TTS/telephony task the instant either callback fires, so
+    a second firing means the agent audibly says two different things for one turn,
+    and no firing means dead air. Every path that speaks goes through
+    `_SpeechDelivery` (`whole()`/`piece()`), which raises rather than speaking twice —
+    never call the callbacks directly. Phrases are only released after the reply's
+    `state` passed the transition check (`SpeculativeTurnExtractor`). If you touch
+    `_propose_and_validate`/`_propose_and_validate_streaming`, `_SpeechDelivery`,
+    `PhraseSplitter` or `extract_partial_json_string`, re-run
+    `tests/unit/test_engine_streaming.py` and `tests/unit/test_engine_phrase_streaming.py`
+    — they cover "already spoke, then the stream died", "nothing spoken yet, fall back
+    to the plain path" and "speech starts before the reply is complete". Never let a
+    tool call's DB round trip sit between the first phrase existing and the callback
+    firing — that reintroduces the latency this was built to remove.
 
 ## When client materials arrive (existing code, prompts, scripts, credentials)
 

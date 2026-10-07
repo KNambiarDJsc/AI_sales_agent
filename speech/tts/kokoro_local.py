@@ -10,8 +10,8 @@ Latency design (measured on the dev laptop: ~0.35x real time, i.e. 1 s of speech
   quickly; later pieces are full sentences for natural prosody.
 - Pieces are generated back-to-back in the background while earlier ones are already
   being streamed out, so playback never waits on generation after the first piece.
-- One worker thread for all synthesis: ONNX Runtime already uses every core per call,
-  and running two at once (e.g. VoiceSession's per-sentence pipelining) would only make
+- One worker thread for all synthesis: ONNX Runtime already spreads each call over
+  several cores (`settings.local_tts_threads`), and running two at once (e.g. VoiceSession's per-sentence pipelining) would only make
   both slower. FIFO order means the first sentence is still synthesized first.
 """
 from __future__ import annotations
@@ -58,11 +58,13 @@ def _load_engine():
                 raise FileNotFoundError(
                     f"Kokoro model files missing in {model.parent} — run: python scripts/setup_local_models.py"
                 )
+            s = get_settings()
             options = ort.SessionOptions()
             options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+            if s.local_tts_threads > 0:
+                options.intra_op_num_threads = s.local_tts_threads  # see settings.local_tts_threads
             session = ort.InferenceSession(str(model), options, providers=["CPUExecutionProvider"])
             engine = Kokoro.from_session(session, str(voices))
-            s = get_settings()
             engine.create("Ready.", voice=s.local_tts_voice, speed=s.local_tts_speed, lang=s.local_tts_lang)  # warm-up
             _engine = engine
             logger.info("kokoro_loaded", extra={"model": str(model)})
