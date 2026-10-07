@@ -6,44 +6,45 @@ trial accounts cannot use the custom webhook/streaming our architecture needs �
 STATUS.md's "Real outbound call attempt" section). None of that blocks demonstrating
 the actual AI agent, though: this endpoint runs the exact same orchestration stack
 (`ConversationEngine`, the real state machine/script, the real tool registry and
-qualification engine, real OpenAI STT/TTS) over the browser's own microphone and
-speakers instead of a phone line — free, no account, no KYC, testable immediately.
+qualification engine, the same STT/LLM/TTS providers as a phone call — OpenAI, or the
+local Moonshine/Ollama/Kokoro backup) over the browser's own microphone and speakers.
 
 This is a demo harness, not a second production transport: push-to-talk instead of
 VAD, and it provisions its own throwaway Tenant/Campaign/Lead/CallAttempt rows per
 session rather than going through the campaign/lead-import flow. When real telephony
 is available, the call path is `apps/api/routers/media.py`, not this file.
 
-Turn handling (rewritten after "pressing Hold to Talk twice made the agent answer
-twice at once"):
+Audio: the page captures raw PCM16 at 16 kHz with an AudioWorklet and streams it while
+the button is held — what both STT backends take natively (no compressed-audio
+decoding, which the local backend can't do, and no encode/upload step after release).
+
+Turn handling:
 - One turn at a time: a lock serialises every `engine.run_turn` (the engine's state
   machine and history are not safe to run concurrently anyway).
-- The newest utterance wins. A new utterance, or the client pressing the talk button
-  (`barge_in`), stops any reply that is playing (TTS cancelled, `interrupt` sent so the
-  page drops queued audio) and mutes replies still being generated for older turns.
-  An utterance that was superseded while waiting for the lock is skipped entirely.
-- The page discards accidental clicks and silent recordings before sending, gives
-  each recording its own MediaRecorder (a shared chunk buffer is how two quick presses
-  used to merge), and plays reply audio as it streams in instead of after the whole
-  reply has been synthesized.
-- Each turn reports where its time went (`timing`), shown under the reply.
+- The newest utterance wins. Starting a new utterance stops any reply that is playing
+  (TTS cancelled, `interrupt` sent so the page drops queued audio) and mutes replies
+  still being generated for older turns. An utterance superseded while waiting for
+  the lock is skipped entirely.
+- The page cancels accidental clicks and silent recordings, and plays reply audio as
+  it streams in.
+- Each turn reports where its time went and which backend served each stage (`timing`).
 
 Protocol (JSON text frames unless noted):
-  client → server: {"type": "hello", "mime": "..."}; utterance audio as one binary
-                   frame per utterance; {"type": "barge_in"} when the talk button is
-                   pressed.
-  server → client: info / customer_text / agent_text / audio_start {sample_rate} /
-                   binary PCM16 chunks / audio_end / interrupt / timing / call_ended.
+  client → server: utterance_start; binary PCM16 16 kHz mono chunks while recording;
+                   utterance_end | utterance_cancel.
+  server → client: info / error / customer_text / agent_text / audio_start
+                   {sample_rate} / binary PCM16 chunks / audio_end / interrupt / timing /
+                   call_ended.
 """
 from __future__ import annotations
 
 import asyncio
 import contextlib
-import io
 import json
 import logging
 import uuid
 
+import openai
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from sqlalchemy import select
@@ -51,14 +52,14 @@ from sqlalchemy import select
 from config.settings import PROMPTS_DIR, get_settings
 from database.models import CallAttempt, Campaign, Conversation, Lead, Tenant
 from database.session import session_scope
-from llm.openai import OpenAILLMProvider
-from llm.openai_client import get_openai_client
+from llm.factory import get_llm_provider
 from orchestrator.context import ConversationContext
 from orchestrator.engine import ConversationEngine
 from orchestrator.prompts import load_campaign_prompt
 from orchestrator.state_machine import StateMachine, load_script_by_id
 from services.call_worker.lifecycle import finalize_call
-from speech.tts.openai import OPENAI_TTS_SAMPLE_RATE_HZ, OpenAITTSProvider
+from speech.stt.factory import get_stt_provider
+from speech.tts.factory import get_tts_provider
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["demo"])
@@ -67,11 +68,9 @@ DEMO_TENANT_NAME = "Browser Demo Tenant"
 DEMO_CAMPAIGN_NAME = "Browser Demo Campaign"
 DEMO_SCRIPT_ID = "product-a"
 
-# Anything smaller can't hold a real utterance (≈0.3 s of opus already exceeds it);
-# the page filters accidental clicks first, this is the server-side backstop.
-MIN_UTTERANCE_BYTES = 1500
-
-_MIME_EXTENSIONS = {"audio/webm": "webm", "audio/ogg": "ogg", "audio/mp4": "mp4", "audio/mpeg": "mp3", "audio/wav": "wav"}
+# Server-side backstop for accidental clicks (the page filters them first): less than
+# 0.3 s of 16 kHz PCM16 can't hold a real utterance.
+MIN_UTTERANCE_BYTES = int(0.3 * 16000 * 2)
 
 
 async def _get_or_create_demo_campaign(session) -> tuple[Tenant, Campaign]:
@@ -105,22 +104,19 @@ async def _get_or_create_demo_campaign(session) -> tuple[Tenant, Campaign]:
     return tenant, campaign
 
 
-async def _transcribe_blob(blob: bytes, extension: str) -> str:
-    settings = get_settings()
-    audio_file = io.BytesIO(blob)
-    audio_file.name = f"utterance.{extension}"
-    extra = {"language": settings.stt_language} if settings.stt_language else {}
-    try:
-        response = await asyncio.wait_for(
-            get_openai_client().audio.transcriptions.create(
-                model=settings.openai_stt_model, file=audio_file, response_format="json", **extra
-            ),
-            timeout=settings.stt_timeout_seconds,
-        )
-        return (getattr(response, "text", "") or "").strip()
-    except Exception:  # noqa: BLE001 - a failed transcription must not kill the demo session
-        logger.exception("demo_transcription_failed")
-        return ""
+def _problem_text(exc: BaseException) -> str:
+    """A plain-language reason for a failure the person testing can act on. With
+    AI_BACKEND=auto, OpenAI account problems fail over to the local models instead of
+    landing here; these are what's left (OpenAI-only mode, or the local backend down)."""
+    if isinstance(exc, openai.RateLimitError) and "insufficient_quota" in str(exc):
+        return "OpenAI account is out of credits — add credits at platform.openai.com → Billing, or set AI_BACKEND=auto/local."
+    if isinstance(exc, openai.AuthenticationError):
+        return "OpenAI rejected the API key — fix OPENAI_API_KEY in .env, or set AI_BACKEND=auto/local."
+    if isinstance(exc, FileNotFoundError):
+        return f"Local model files missing — run: python scripts/setup_local_models.py ({exc})"
+    if "11434" in str(exc) or "ollama" in str(exc).lower() or type(exc).__name__ == "ConnectError":
+        return "Local LLM (Ollama) isn't reachable — start Ollama, then reload this page."
+    return f"{type(exc).__name__}: {str(exc)[:200]}"
 
 
 @router.get("/demo", response_class=HTMLResponse)
@@ -131,7 +127,10 @@ async def demo_page() -> str:
 @router.websocket("/demo/ws")
 async def demo_ws(websocket: WebSocket) -> None:
     await websocket.accept()
-    tts_provider = OpenAITTSProvider()
+    settings = get_settings()
+    tts_provider = get_tts_provider()
+    stt_provider = get_stt_provider()
+    llm_provider = get_llm_provider()
 
     async with session_scope() as session:
         tenant, campaign = await _get_or_create_demo_campaign(session)
@@ -181,7 +180,7 @@ async def demo_ws(websocket: WebSocket) -> None:
         timezone=campaign_timezone,
     )
     state_machine = StateMachine(script, current_state="INTRO")
-    engine = ConversationEngine(OpenAILLMProvider(), state_machine, context)
+    engine = ConversationEngine(llm_provider, state_machine, context)
 
     loop = asyncio.get_running_loop()
     turn_lock = asyncio.Lock()
@@ -189,7 +188,7 @@ async def demo_ws(websocket: WebSocket) -> None:
     muted_up_to = -1  # replies for turns <= this are not spoken (barge-in)
     speak_task: asyncio.Task | None = None
     turn_tasks: set[asyncio.Task] = set()
-    extension = "webm"
+    recording = None  # (stt_stream, bytes_received) for the utterance being recorded
     call_ended = False
 
     async def send_json(payload: dict) -> None:
@@ -207,9 +206,16 @@ async def demo_ws(websocket: WebSocket) -> None:
             await asyncio.wait([task])
             await send_json({"type": "interrupt"})
 
+    def backends() -> dict:
+        return {
+            "stt_backend": getattr(stt_provider, "backend", "?"),
+            "llm_backend": getattr(llm_provider, "backend", "?"),
+            "tts_backend": getattr(tts_provider, "backend", "?"),
+        }
+
     async def speak(text: str, turn_id: int, timing: dict) -> None:
         await send_json({"type": "agent_text", "text": text})
-        await send_json({"type": "audio_start", "sample_rate": OPENAI_TTS_SAMPLE_RATE_HZ})
+        await send_json({"type": "audio_start", "sample_rate": tts_provider.sample_rate_hz})
         first = True
         try:
             async for chunk in tts_provider.synthesize_stream(text):
@@ -218,14 +224,15 @@ async def demo_ws(websocket: WebSocket) -> None:
                     now = loop.time()
                     timing["tts"] = now - timing.pop("_speech_ready_at", now)
                     timing["server"] = now - timing.pop("_received_at", now)
-                    await send_json({"type": "timing", **{k: round(v, 3) for k, v in timing.items()}})
-                    logger.info("demo_turn_timing", extra={"turn": turn_id, **{k: round(v, 3) for k, v in timing.items()}})
+                    numbers = {k: round(v, 3) for k, v in timing.items()}
+                    await send_json({"type": "timing", **numbers, **backends()})
+                    logger.info("demo_turn_timing", extra={"turn": turn_id, **numbers, **backends()})
                 await websocket.send_bytes(chunk)
         except asyncio.CancelledError:
             raise
-        except Exception:  # noqa: BLE001 - the text is already on screen; don't kill the session over audio
+        except Exception as exc:  # noqa: BLE001 - the text is already on screen; don't kill the session over audio
             logger.exception("demo_tts_failed", extra={"turn": turn_id})
-            await send_json({"type": "info", "text": "(audio for this reply failed)"})
+            await send_json({"type": "error", "text": "Speech audio failed: " + _problem_text(exc)})
         await send_json({"type": "audio_end"})
 
     async def run_turn(turn_id: int, customer_text: str, timing: dict) -> None:
@@ -262,14 +269,22 @@ async def demo_ws(websocket: WebSocket) -> None:
             call_ended = True
             await send_json({"type": "call_ended"})
 
-    async def handle_utterance(turn_id: int, blob: bytes, received_at: float) -> None:
-        async with turn_lock:
-            if turn_id != latest_turn or call_ended:
-                return  # superseded by a newer utterance while waiting
-            try:
+    async def handle_utterance(turn_id: int, stream, received_at: float) -> None:
+        try:
+            async with turn_lock:
+                if turn_id != latest_turn or call_ended:
+                    return  # superseded by a newer utterance while waiting
                 timing: dict = {"_received_at": received_at}
-                transcript = await _transcribe_blob(blob, extension)
+                try:
+                    final = await asyncio.wait_for(stream.receive_final(), timeout=settings.stt_timeout_seconds + 4)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    logger.exception("demo_transcription_failed", extra={"turn": turn_id})
+                    await send_json({"type": "error", "text": "Transcription failed: " + _problem_text(exc)})
+                    return
                 timing["stt"] = loop.time() - received_at
+                transcript = final.text.strip() if final else ""
                 if turn_id != latest_turn:
                     return
                 if not transcript:
@@ -277,11 +292,14 @@ async def demo_ws(websocket: WebSocket) -> None:
                     return
                 await send_json({"type": "customer_text", "text": transcript})
                 await run_turn(turn_id, transcript, timing)
-            except asyncio.CancelledError:
-                raise
-            except Exception:  # noqa: BLE001 - one bad turn must not end the demo session
-                logger.exception("demo_turn_failed", extra={"turn": turn_id})
-                await send_json({"type": "info", "text": "(something went wrong on that turn — please try again)"})
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - one bad turn must not end the demo session
+            logger.exception("demo_turn_failed", extra={"turn": turn_id})
+            await send_json({"type": "error", "text": "That turn failed: " + _problem_text(exc)})
+        finally:
+            with contextlib.suppress(Exception):
+                await stream.close()
 
     async def opening_line() -> None:
         async with turn_lock:
@@ -289,43 +307,59 @@ async def demo_ws(websocket: WebSocket) -> None:
                 await run_turn(0, "", {"_received_at": loop.time()})
             except asyncio.CancelledError:
                 raise
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
                 logger.exception("demo_turn_failed", extra={"turn": 0})
-                await send_json({"type": "info", "text": "(the agent couldn't start — reconnect to retry)"})
+                await send_json({"type": "error", "text": "The agent couldn't start: " + _problem_text(exc)})
+
+    def spawn(coro) -> None:
+        task = asyncio.create_task(coro)
+        turn_tasks.add(task)
+        task.add_done_callback(turn_tasks.discard)
 
     try:
         await send_json({"type": "info", "text": "Connected — the agent will greet you now."})
-        task = asyncio.create_task(opening_line())
-        turn_tasks.add(task)
-        task.add_done_callback(turn_tasks.discard)
+        spawn(opening_line())
 
         while True:
             message = await websocket.receive()
             if message["type"] == "websocket.disconnect":
                 break
             if message.get("bytes") is not None:
-                blob = message["bytes"]
-                if call_ended:
+                if recording is not None:
+                    stream, received = recording
+                    await stream.send_audio(message["bytes"])
+                    recording = (stream, received + len(message["bytes"]))
+                continue
+            if not message.get("text"):
+                continue
+            try:
+                kind = json.loads(message["text"]).get("type")
+            except (json.JSONDecodeError, AttributeError):
+                continue
+
+            if kind == "utterance_start":
+                await interrupt()  # pressing talk always cuts the agent off
+                if recording is not None:  # a previous press never ended — discard it
+                    with contextlib.suppress(Exception):
+                        await recording[0].close()
+                recording = (await stt_provider.start_stream(), 0)
+            elif kind in ("utterance_end", "utterance_cancel"):
+                if recording is None:
                     continue
-                if len(blob) < MIN_UTTERANCE_BYTES:
-                    await send_json({"type": "info", "text": "(too short — hold the button while you speak)"})
+                stream, received = recording
+                recording = None
+                if kind == "utterance_cancel" or call_ended or received < MIN_UTTERANCE_BYTES:
+                    with contextlib.suppress(Exception):
+                        await stream.close()
+                    if kind == "utterance_end" and not call_ended:
+                        await send_json({"type": "info", "text": "(too short — hold the button while you speak)"})
                     continue
                 received_at = loop.time()
-                await interrupt()  # the newest utterance always wins (mutes turns up to now)...
+                await interrupt()  # mutes every older turn...
                 latest_turn += 1  # ...then this one gets an id above the muted range
-                task = asyncio.create_task(handle_utterance(latest_turn, blob, received_at))
-                turn_tasks.add(task)
-                task.add_done_callback(turn_tasks.discard)
-            elif message.get("text"):
-                try:
-                    data = json.loads(message["text"])
-                except json.JSONDecodeError:
-                    continue
-                if data.get("type") == "barge_in":
-                    await interrupt()
-                elif data.get("type") == "hello":
-                    mime = str(data.get("mime", "")).split(";")[0].strip().lower()
-                    extension = _MIME_EXTENSIONS.get(mime, "webm")
+                spawn(handle_utterance(latest_turn, stream, received_at))
+            elif kind == "barge_in":
+                await interrupt()
     except WebSocketDisconnect:
         pass
     finally:
@@ -336,6 +370,9 @@ async def demo_ws(websocket: WebSocket) -> None:
         if speak_task is not None and not speak_task.done():
             speak_task.cancel()
             await asyncio.wait([speak_task])
+        if recording is not None:
+            with contextlib.suppress(Exception):
+                await recording[0].close()
         await tts_provider.close()
         async with session_scope() as session:
             await finalize_call(
@@ -353,11 +390,13 @@ DEMO_HTML = """<!doctype html>
   body { font-family: system-ui, -apple-system, sans-serif; max-width: 680px; margin: 40px auto; padding: 0 16px; color: #1a1a1a; }
   h2 { margin-bottom: 4px; }
   p.sub { color: #666; margin-top: 0; }
+  #backend { font-size: 13px; color: #555; margin: 6px 0 0; }
   #log { border: 1px solid #ddd; border-radius: 10px; padding: 14px; height: 380px; overflow-y: auto; margin-top: 16px; background: #fafafa; }
   .msg { margin: 10px 0; line-height: 1.4; }
   .agent { color: #1a5fb4; }
   .customer { color: #26a269; }
   .info { color: #888; font-style: italic; }
+  .error { color: #c01c28; font-weight: 600; }
   .timing { color: #9a6700; font-size: 13px; margin-top: -6px; }
   .controls { display: flex; gap: 12px; margin-top: 16px; }
   button { font-size: 16px; padding: 12px 22px; border-radius: 10px; border: none; cursor: pointer; touch-action: none; user-select: none; }
@@ -371,6 +410,7 @@ DEMO_HTML = """<!doctype html>
 <body>
 <h2>Voice Sales Agent — Live Demo</h2>
 <p class="sub">Talks to the real backend (state machine, qualification, tools) over your mic/speakers. Hold the button (or the space bar) while you speak; pressing it while the agent talks interrupts it.</p>
+<div id="backend">Checking AI backend…</div>
 <div class="controls">
   <button id="startBtn">Start Call</button>
   <button id="talkBtn" disabled>Hold to Talk</button>
@@ -380,8 +420,33 @@ DEMO_HTML = """<!doctype html>
 <script>
 const MIN_RECORDING_MS = 350;   // shorter presses are accidental clicks
 const MIN_LEVEL = 0.01;         // peak RMS below this = nothing was said
-let ws, audioCtx, micStream, analyser, mimeType = '';
-let rec = null, levelTimer = null, callEnded = false;
+const CAPTURE_RATE = 16000;     // what both STT backends take natively
+const WORKLET = `
+class PcmCapture extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this.buf = new Int16Array(1600);  // 100 ms at 16 kHz
+    this.n = 0;
+    this.port.onmessage = () => {     // "flush": send whatever is buffered
+      if (this.n) this.port.postMessage(this.buf.slice(0, this.n).buffer);
+      this.n = 0;
+      this.port.postMessage('flushed');
+    };
+  }
+  process(inputs) {
+    const ch = inputs[0] && inputs[0][0];
+    if (ch) for (let i = 0; i < ch.length; i++) {
+      const v = Math.max(-1, Math.min(1, ch[i]));
+      this.buf[this.n++] = v < 0 ? v * 32768 : v * 32767;
+      if (this.n === this.buf.length) { this.port.postMessage(this.buf.slice().buffer); this.n = 0; }
+    }
+    return true;
+  }
+}
+registerProcessor('pcm-capture', PcmCapture);`;
+
+let ws, playCtx, micCtx, micStream, captureNode, callEnded = false;
+let rec = null, flushResolve = null;
 let sources = [], nextTime = 0, acceptAudio = false, carry = null, sampleRate = 24000;
 let releaseAt = null, waitingFirstAudio = false, lastTimingEl = null;
 
@@ -398,6 +463,12 @@ function log(cls, text) {
   return p;
 }
 
+fetch('/health/ai').then((r) => r.json()).then((h) => {
+  const el = document.getElementById('backend');
+  const parts = Object.entries(h.components).map(([k, v]) => k.toUpperCase() + ': ' + v);
+  el.textContent = 'AI backend (' + h.mode + '): ' + parts.join(' · ') + (h.openai.reason ? '  —  OpenAI unavailable: ' + h.openai.reason : '');
+}).catch(() => { document.getElementById('backend').textContent = ''; });
+
 function stopPlayback() {
   for (const s of sources) { try { s.stop(); } catch (e) {} }
   sources = []; nextTime = 0; acceptAudio = false; carry = null;
@@ -412,12 +483,12 @@ function playChunk(data) {
   const samples = new Int16Array(bytes.buffer, bytes.byteOffset, bytes.length / 2);
   const f = new Float32Array(samples.length);
   for (let i = 0; i < samples.length; i++) f[i] = samples[i] / 32768;
-  const buf = audioCtx.createBuffer(1, f.length, sampleRate);
+  const buf = playCtx.createBuffer(1, f.length, sampleRate);
   buf.copyToChannel(f, 0);
-  const src = audioCtx.createBufferSource();
+  const src = playCtx.createBufferSource();
   src.buffer = buf;
-  src.connect(audioCtx.destination);
-  const at = Math.max(audioCtx.currentTime + 0.02, nextTime);
+  src.connect(playCtx.destination);
+  const at = Math.max(playCtx.currentTime + 0.02, nextTime);
   src.start(at);
   nextTime = at + buf.duration;
   sources.push(src);
@@ -427,7 +498,7 @@ function playChunk(data) {
   };
   if (waitingFirstAudio && releaseAt !== null) {
     waitingFirstAudio = false;
-    const heard = (performance.now() - releaseAt) / 1000 + (at - audioCtx.currentTime);
+    const heard = (performance.now() - releaseAt) / 1000 + (at - playCtx.currentTime);
     const el = lastTimingEl || log('timing', '');
     el.textContent = '⏱ you stopped → agent audio: ' + heard.toFixed(2) + 's' + (el.dataset.detail || '');
   }
@@ -440,16 +511,18 @@ function onMessage(event) {
   if (msg.type === 'agent_text') { log('agent', msg.text); lastTimingEl = null; }
   else if (msg.type === 'customer_text') { log('customer', msg.text); setStatus('Thinking…'); }
   else if (msg.type === 'info') { log('info', msg.text); if (!rec) setStatus('Your turn — hold to talk'); }
+  else if (msg.type === 'error') { log('error', '⚠ ' + msg.text); setStatus(msg.text); }
   else if (msg.type === 'audio_start') { stopPlayback(); sampleRate = msg.sample_rate; acceptAudio = true; }
   else if (msg.type === 'audio_end') { acceptAudio = false; }
   else if (msg.type === 'interrupt') { stopPlayback(); }
   else if (msg.type === 'timing') {
+    const tag = (b) => (b === 'local' ? 'local' : b === 'openai' ? 'OpenAI' : b);
     const parts = [];
-    if (msg.stt !== undefined) parts.push('STT ' + msg.stt.toFixed(2));
-    if (msg.llm !== undefined) parts.push('LLM ' + msg.llm.toFixed(2));
-    if (msg.tts !== undefined) parts.push('TTS ' + msg.tts.toFixed(2));
+    if (msg.stt !== undefined) parts.push('STT ' + msg.stt.toFixed(2) + ' ' + tag(msg.stt_backend));
+    if (msg.llm !== undefined) parts.push('LLM ' + msg.llm.toFixed(2) + ' ' + tag(msg.llm_backend));
+    if (msg.tts !== undefined) parts.push('TTS ' + msg.tts.toFixed(2) + ' ' + tag(msg.tts_backend));
     lastTimingEl = log('timing', '');
-    lastTimingEl.dataset.detail = '  (' + parts.join(' · ') + ' s)';
+    lastTimingEl.dataset.detail = '  (' + parts.join(' · ') + ')';
     lastTimingEl.textContent = '⏱ server ' + (msg.server || 0).toFixed(2) + 's' + lastTimingEl.dataset.detail;
   }
   else if (msg.type === 'call_ended') {
@@ -457,75 +530,69 @@ function onMessage(event) {
   }
 }
 
-function pickMime() {
-  for (const m of ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus', 'audio/mp4']) {
-    if (window.MediaRecorder && MediaRecorder.isTypeSupported(m)) return m;
-  }
-  return '';
-}
-
-function currentLevel() {
-  const a = new Float32Array(analyser.fftSize);
-  analyser.getFloatTimeDomainData(a);
-  let s = 0; for (const v of a) s += v * v;
-  return Math.sqrt(s / a.length);
+function onCapturedAudio(e) {
+  if (e.data === 'flushed') { if (flushResolve) { flushResolve(); flushResolve = null; } return; }
+  if (!rec) return;
+  const pcm = new Int16Array(e.data);
+  let s = 0; for (let i = 0; i < pcm.length; i++) s += (pcm[i] / 32768) ** 2;
+  rec.maxLevel = Math.max(rec.maxLevel, Math.sqrt(s / Math.max(1, pcm.length)));
+  if (ws && ws.readyState === 1) ws.send(e.data);
 }
 
 function startTalking() {
-  if (!ws || ws.readyState !== 1 || rec || callEnded || !micStream) return;
-  stopPlayback();                                   // barge-in, locally...
-  ws.send(JSON.stringify({ type: 'barge_in' }));    // ...and on the server
-  const r = { chunks: [], startedAt: performance.now(), stoppedAt: 0, maxLevel: 0 };
-  r.recorder = new MediaRecorder(micStream, mimeType ? { mimeType } : undefined);  // one per recording
-  r.recorder.ondataavailable = (e) => { if (e.data.size > 0) r.chunks.push(e.data); };
-  r.recorder.onstop = () => finishRecording(r);
-  rec = r;
-  r.recorder.start();
-  levelTimer = setInterval(() => { r.maxLevel = Math.max(r.maxLevel, currentLevel()); }, 40);
+  if (!ws || ws.readyState !== 1 || rec || callEnded || !captureNode) return;
+  stopPlayback();                                        // barge-in, locally...
+  ws.send(JSON.stringify({ type: 'utterance_start' }));  // ...and on the server
+  rec = { startedAt: performance.now(), maxLevel: 0 };
   talkBtn.classList.add('recording');
   talkBtn.textContent = 'Recording… release to send';
   setStatus('Listening…');
 }
 
-function stopTalking() {
+async function stopTalking() {
   if (!rec) return;
-  const r = rec; rec = null;
-  clearInterval(levelTimer);
-  r.maxLevel = Math.max(r.maxLevel, currentLevel());
-  r.stoppedAt = performance.now();
-  r.recorder.stop();
+  const r = rec;
   talkBtn.classList.remove('recording');
   talkBtn.textContent = 'Hold to Talk';
-}
-
-function finishRecording(r) {
-  const ms = r.stoppedAt - r.startedAt;
-  if (ms < MIN_RECORDING_MS) { log('info', '(too short — hold the button while you speak)'); setStatus('Your turn — hold to talk'); return; }
-  if (r.maxLevel < MIN_LEVEL) { log('info', "(didn't hear anything — check your microphone)"); setStatus('Your turn — hold to talk'); return; }
-  const blob = new Blob(r.chunks, { type: mimeType || 'audio/webm' });
-  releaseAt = r.stoppedAt; waitingFirstAudio = true;
-  blob.arrayBuffer().then((buf) => { if (ws && ws.readyState === 1) ws.send(buf); });
+  await new Promise((resolve) => { flushResolve = resolve; captureNode.port.postMessage('flush'); setTimeout(resolve, 200); });
+  rec = null;
+  const ms = performance.now() - r.startedAt;
+  if (ms < MIN_RECORDING_MS || r.maxLevel < MIN_LEVEL) {
+    ws.send(JSON.stringify({ type: 'utterance_cancel' }));
+    log('info', ms < MIN_RECORDING_MS ? '(too short — hold the button while you speak)' : "(didn't hear anything — check your microphone)");
+    setStatus('Your turn — hold to talk');
+    return;
+  }
+  releaseAt = performance.now(); waitingFirstAudio = true;
+  ws.send(JSON.stringify({ type: 'utterance_end' }));
   setStatus('Thinking…');
 }
 
 startBtn.onclick = async () => {
   startBtn.disabled = true; callEnded = false;
-  audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
-  await audioCtx.resume();
+  playCtx = playCtx || new (window.AudioContext || window.webkitAudioContext)();
+  await playCtx.resume();
   try {
-    micStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 } });
+    if (!micCtx) {
+      micCtx = new AudioContext({ sampleRate: CAPTURE_RATE });   // the browser resamples the mic to 16 kHz
+      await micCtx.audioWorklet.addModule(URL.createObjectURL(new Blob([WORKLET], { type: 'application/javascript' })));
+      captureNode = new AudioWorkletNode(micCtx, 'pcm-capture');
+      captureNode.port.onmessage = onCapturedAudio;
+      const sink = micCtx.createGain(); sink.gain.value = 0;     // keep the graph pulling audio
+      captureNode.connect(sink); sink.connect(micCtx.destination);
+    }
+    micCtx.createMediaStreamSource(micStream).connect(captureNode);
+    await micCtx.resume();
   } catch (err) {
-    log('info', 'Microphone permission denied: ' + err.message); startBtn.disabled = false; return;
+    log('error', '⚠ Microphone unavailable: ' + err.message); startBtn.disabled = false; return;
   }
-  analyser = audioCtx.createAnalyser(); analyser.fftSize = 1024;
-  audioCtx.createMediaStreamSource(micStream).connect(analyser);
-  mimeType = pickMime();
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(proto + '://' + location.host + '/demo/ws');
   ws.binaryType = 'arraybuffer';
   ws.onmessage = onMessage;
-  ws.onopen = () => { ws.send(JSON.stringify({ type: 'hello', mime: mimeType })); talkBtn.disabled = false; setStatus('Connecting…'); };
-  ws.onclose = () => { startBtn.disabled = false; talkBtn.disabled = true; stopPlayback(); if (!callEnded) setStatus('Disconnected'); };
+  ws.onopen = () => { talkBtn.disabled = false; setStatus('Connecting…'); };
+  ws.onclose = () => { startBtn.disabled = false; talkBtn.disabled = true; stopPlayback(); rec = null; if (!callEnded) setStatus('Disconnected'); };
 };
 
 talkBtn.addEventListener('pointerdown', (e) => { e.preventDefault(); talkBtn.setPointerCapture(e.pointerId); startTalking(); });

@@ -8,6 +8,7 @@ against this.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import yaml
@@ -59,6 +60,12 @@ class ScriptConfig(BaseModel):
     max_call_duration_seconds: int = 420
     retry_limits: dict[str, int] = Field(default_factory=lambda: {"per_question": 2, "per_state": 3})
     qualification_ref: str | None = None
+    dnc_phrases: list[str] = Field(default_factory=list)
+
+    def is_dnc_request(self, customer_text: str) -> bool:
+        """Deterministic DNC detection from the script's configured phrases — see
+        `dnc_phrases` in config/scripts/*.yaml."""
+        return any(re.search(p, customer_text, re.IGNORECASE) for p in self.dnc_phrases)
 
     def allowed_next_states(self, current_state: str) -> set[str]:
         state = self.states.get(current_state)
@@ -72,6 +79,16 @@ class ScriptConfig(BaseModel):
         tools = set(state.allowed_tools) if state else set()
         # mark_dnc and end_call are always available as a safety valve.
         return tools | {"mark_dnc", "end_call"}
+
+    def is_closing_state(self, state_name: str) -> bool:
+        """END, DO_NOT_CALL, or a state whose only way forward is END (INTERESTED,
+        CALLBACK, NOT_INTERESTED, ... in product-a) — derived from the script config,
+        not hard-coded. The engine only lets a call end from one of these."""
+        if state_name in GLOBAL_SAFETY_STATES:
+            return True
+        state = self.states.get(state_name)
+        targets = set(state.transitions_on.values()) if state else set()
+        return bool(targets) and targets <= {"END"}
 
     def fallback_for(self, state_name: str, fields: dict | None = None) -> str:
         state = self.states.get(state_name)
@@ -91,6 +108,7 @@ def load_script(path: str | Path) -> ScriptConfig:
         max_call_duration_seconds=raw.get("max_call_duration_seconds", 420),
         retry_limits=raw.get("retry_limits", {"per_question": 2, "per_state": 3}),
         qualification_ref=raw.get("qualification_ref"),
+        dnc_phrases=raw.get("dnc_phrases") or [],
     )
 
 
@@ -119,6 +137,13 @@ class StateMachine:
 
     def allowed_tools(self) -> set[str]:
         return self.script.allowed_tools(self.current_state)
+
+    def intent_options(self) -> list[str]:
+        """Labels the LLM classifies the customer's reply into: this state's own
+        `transitions_on` conditions (config), plus the always-available ones."""
+        state = self.script.states.get(self.current_state)
+        labels = list(state.transitions_on) if state else []
+        return labels + [x for x in ("asked_not_to_be_called", "said_goodbye", "other") if x not in labels]
 
     def fallback_response(self, fields: dict | None = None) -> str:
         return self.script.fallback_for(self.current_state, fields)

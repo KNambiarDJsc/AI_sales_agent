@@ -28,7 +28,6 @@ from config.settings import get_settings
 from orchestrator.engine import ConversationEngine
 from speech.stt.base import STTProvider
 from speech.tts.base import TTSProvider
-from speech.tts.openai import OPENAI_TTS_SAMPLE_RATE_HZ
 from telephony.base import TelephonyProvider
 from voice.audio.processing import (
     TELEPHONY_SAMPLE_RATE_HZ,
@@ -343,10 +342,11 @@ class VoiceSession:
                     item = await queue.get()
                     if item is None:
                         break
+                    tts_rate = self._tts_provider.sample_rate_hz
                     if self._audio_encoding == "mulaw":
-                        telephony_frame = tts_pcm16_to_telephony_frame(item, OPENAI_TTS_SAMPLE_RATE_HZ, self._resample_out)
+                        telephony_frame = tts_pcm16_to_telephony_frame(item, tts_rate, self._resample_out)
                     else:
-                        telephony_frame = tts_pcm16_to_telephony_pcm16(item, OPENAI_TTS_SAMPLE_RATE_HZ, self._resample_out)
+                        telephony_frame = tts_pcm16_to_telephony_pcm16(item, tts_rate, self._resample_out)
                     for frame in frame_chunker.push(telephony_frame):
                         await _send_paced(frame)
             remainder = frame_chunker.flush()

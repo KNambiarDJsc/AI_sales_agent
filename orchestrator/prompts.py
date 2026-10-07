@@ -32,21 +32,9 @@ def load_campaign_prompt(path: str | Path) -> dict:
         return yaml.safe_load(f)
 
 
-def build_system_message(script: ScriptConfig, context: ConversationContext) -> LLMMessage:
+def _static_system_text(script: ScriptConfig, context: ConversationContext) -> str:
+    """Everything identical on every turn of a call (and across calls of a campaign)."""
     system_prompt = _load_system_prompt()
-    state_cfg = script.states[context.current_state]
-    allowed_tools = sorted(script.allowed_tools(context.current_state))
-
-    try:
-        now_local = datetime.now(ZoneInfo(context.timezone))
-    except Exception:  # noqa: BLE001 - a bad/missing timezone must not break a live call
-        now_local = datetime.now(ZoneInfo("UTC"))
-
-    # Order matters for latency: everything that is identical on every turn of every
-    # call comes first, everything that changes per turn last. OpenAI caches a
-    # repeated prompt *prefix*, which cuts time-to-first-token — but only up to the
-    # first character that differs, so the clock and the state used to sit near the
-    # top and broke the cache on every single request.
     parts = [
         system_prompt["role"],
         f"Identity disclosure requirement: {system_prompt.get('identity_disclosure', 'NOT CONFIRMED')}",
@@ -61,8 +49,19 @@ def build_system_message(script: ScriptConfig, context: ConversationContext) -> 
     qualification_block = _qualification_facts_block(script)
     if qualification_block:
         parts.append(qualification_block)
-    parts += [
-        "",
+    return "\n".join(parts)
+
+
+def _turn_context_text(script: ScriptConfig, context: ConversationContext) -> str:
+    """Everything that changes from turn to turn: the clock, state, questions, facts,
+    tools allowed right now."""
+    state_cfg = script.states[context.current_state]
+    allowed_tools = sorted(script.allowed_tools(context.current_state))
+    try:
+        now_local = datetime.now(ZoneInfo(context.timezone))
+    except Exception:  # noqa: BLE001 - a bad/missing timezone must not break a live call
+        now_local = datetime.now(ZoneInfo("UTC"))
+    parts = [
         f"Current date/time ({context.timezone}): {now_local.strftime('%A, %Y-%m-%d %H:%M')}. "
         "Resolve any relative time the customer gives (e.g. \"tomorrow at 8am\", \"Monday evening\") "
         "against this when calling schedule_callback — requested_time must be an absolute "
@@ -73,16 +72,54 @@ def build_system_message(script: ScriptConfig, context: ConversationContext) -> 
         f"usually stay in {context.current_state} unless this turn's objective is "
         "clearly met): " + ", ".join(sorted(script.allowed_next_states(context.current_state))),
     ]
+    customer_just_spoke = bool(context.history) and context.history[-1].speaker == "customer"
+    if customer_just_spoke:
+        parts.append(_transitions_text(script, context.current_state))
+    else:
+        parts.append(
+            "The customer hasn't said anything yet this turn: speak first, working on this state's objective. "
+            f"Set intent to no_customer_message_yet and keep state {context.current_state}; call no tools."
+        )
     if state_cfg.mandatory_questions:
         parts.append("Mandatory questions for this state (ask any not yet answered):")
         parts.extend(f"- {substitute_placeholders(q, context.lead_fields)}" for q in state_cfg.mandatory_questions)
     if context.lead_fields:
-        parts.append(f"Known lead info: {json.dumps(context.lead_fields, ensure_ascii=False)}")
+        parts.append(
+            "The person you are calling (the customer — not you): "
+            f"{json.dumps(context.lead_fields, ensure_ascii=False)}"
+        )
     if context.extracted_facts:
         parts.append(f"Facts captured so far: {json.dumps(context.extracted_facts, ensure_ascii=False)}")
     parts.append(_tools_block(allowed_tools))
+    return "\n".join(parts)
 
-    return LLMMessage(role="system", content="\n".join(parts))
+
+def _transitions_text(script: ScriptConfig, current_state: str) -> str:
+    """When to move where, straight from the script's `transitions_on` — the model used
+    to see only the list of reachable state names, not what each one means. Small
+    local models in particular guessed (jumping to CALLBACK, ending the call, or
+    putting a merely-uninterested customer on DO_NOT_CALL)."""
+    state = script.states.get(current_state)
+    transitions = dict(state.transitions_on) if state else {}
+    lines = [
+        "How to choose the next state: first set 'intent' to the label that matches the customer's latest "
+        "message, then set 'state' to the state it leads to:"
+    ]
+    lines += [f"- {label} → {target}" for label, target in transitions.items()]
+    if "asked_not_to_be_called" not in transitions:
+        lines.append("- asked_not_to_be_called → DO_NOT_CALL (only an explicit request; not merely uninterested)")
+    if "said_goodbye" not in transitions:
+        lines.append("- said_goodbye → END (the customer is ending the conversation)")
+    lines.append(f"- other → {current_state} (stay here: the objective isn't met yet — e.g. a question, an unclear answer)")
+    return "\n".join(lines)
+
+
+def build_system_message(script: ScriptConfig, context: ConversationContext) -> LLMMessage:
+    """The full instructions as one message (static + this turn's context). The engine
+    sends them split around the history instead — see `build_messages`."""
+    return LLMMessage(
+        role="system", content=_static_system_text(script, context) + "\n\n" + _turn_context_text(script, context)
+    )
 
 
 def _describe_property(name: str, prop: dict, required: bool) -> str:
@@ -156,4 +193,23 @@ def build_message_history(context: ConversationContext) -> list[LLMMessage]:
 
 
 def build_messages(script: ScriptConfig, context: ConversationContext) -> list[LLMMessage]:
-    return [build_system_message(script, context), *build_message_history(context)]
+    """[static instructions] + [conversation before the customer's latest line] +
+    [this turn's context] + [the customer's latest line].
+
+    Order is for latency: OpenAI's prompt cache and a local model's KV cache (Ollama)
+    only reuse an unchanged *prefix*, so the per-turn context (clock, state, facts)
+    must not sit at the top — there it broke the cache on every request. Here the
+    instructions and all earlier history stay a stable prefix and each turn only
+    processes its last few messages.
+
+    The customer's latest line stays *last*: chat models answer the final message.
+    With the turn context placed after it, every local model tested replied to the
+    instructions instead of the customer — repeating the same greeting and never
+    advancing the state."""
+    history = build_message_history(context)
+    turn_context = LLMMessage(role="system", content=_turn_context_text(script, context))
+    if history and history[-1].role == "user":
+        body = [*history[:-1], turn_context, history[-1]]
+    else:
+        body = [*history, turn_context]  # opening line: nothing said yet
+    return [LLMMessage(role="system", content=_static_system_text(script, context)), *body]

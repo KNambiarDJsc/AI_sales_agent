@@ -41,7 +41,7 @@ from database.session import session_scope
 from llm.base import LLMProvider
 from orchestrator.context import ConversationContext
 from orchestrator.prompts import build_messages
-from orchestrator.schema import AgentResponseProposal, build_agent_response_schema
+from orchestrator.schema import AgentResponseProposal, ToolCallProposal, build_agent_response_schema
 from orchestrator.state_machine import StateMachine
 from orchestrator.streaming import SpeculativeTurnExtractor
 from orchestrator.validator import ValidationOutcome, build_fallback_outcome, validate_llm_response
@@ -91,13 +91,50 @@ class ConversationEngine:
             self._context.append_turn("customer", customer_text, self._state_machine.current_state)
             customer_turn_index = len(self._context.history) - 1
 
+        if customer_turn_index is not None and self._state_machine.script.is_dnc_request(customer_text):
+            return await self._handle_dnc_request(
+                session=session, tenant_id=tenant_id, campaign_id=campaign_id, lead_id=lead_id,
+                conversation_id=conversation_id, customer_text=customer_text,
+                customer_turn_index=customer_turn_index, on_speech_ready=on_speech_ready,
+            )
+
+        customer_spoke = customer_turn_index is not None
         messages = build_messages(self._state_machine.script, self._context)
-        outcome = await self._propose_and_validate(messages, on_speech_ready)
+        outcome = await self._propose_and_validate(messages, on_speech_ready, self._turn_schema(customer_spoke))
         proposal = outcome.proposal
+        if not customer_spoke and (
+            proposal.state != self._state_machine.current_state or proposal.tool_call is not None or proposal.end_call
+        ):
+            # Nothing to react to (opening line, re-prompt after silence) — so nothing
+            # may change. The schema already pins `state`; this is the backstop for
+            # anything that bypasses it. Caught with a small local model proposing
+            # DO_NOT_CALL + mark_dnc on the greeting, before the customer said a word.
+            logger.warning("opening_turn_change_refused", extra={"proposed_state": proposal.state})
+            proposal = proposal.model_copy(
+                update={"state": self._state_machine.current_state, "tool_call": None, "end_call": False}
+            )
+        proposes_dnc = proposal.state == "DO_NOT_CALL" or (
+            proposal.tool_call is not None and proposal.tool_call.name == "mark_dnc"
+        )
+        if proposes_dnc and getattr(self._llm, "backend", "openai") == "local":
+            # A real DNC request in the customer's words never gets here — the
+            # configured-phrase backstop handles it before the LLM runs. So a local
+            # model proposing DNC now is guessing, and small local models guessed
+            # wrong: they put a customer who had just said "please have your sales
+            # team call me" (and one who only confirmed their name) on do-not-call.
+            # Suppressing a lead is irreversible in practice; refuse the guess.
+            logger.warning("dnc_from_local_model_refused", extra={"proposed_state": proposal.state})
+            update: dict = {"end_call": False}
+            if proposal.state == "DO_NOT_CALL":
+                update["state"] = self._state_machine.current_state
+            if proposal.tool_call is not None and proposal.tool_call.name == "mark_dnc":
+                update["tool_call"] = None
+            proposal = proposal.model_copy(update=update)
         self._context.merge_facts(proposal.extracted_facts)
 
         tool_summary: str | None = None
         end_call = proposal.end_call
+        dnc_recorded = False
 
         if proposal.tool_call is not None:
             ctx = ToolContext(
@@ -114,10 +151,20 @@ class ConversationEngine:
             tool_summary = result.message
             if proposal.tool_call.name in ("end_call", "mark_dnc") and result.success:
                 end_call = True
+                dnc_recorded = proposal.tool_call.name == "mark_dnc"
             if not result.success:
                 # Not "message": that key is reserved on LogRecord, and logging raises
                 # KeyError for it — which turned every failed tool call into a crashed turn.
                 logger.warning("tool_call_failed", extra={"tool": proposal.tool_call.name, "tool_message": result.message})
+
+        # The LLM proposes hanging up; the application decides. A call only ends from
+        # a closing state (script config: END, DO_NOT_CALL, or a state whose only exit
+        # is END) — or when DNC was just recorded. Caught with small local models,
+        # which called the end_call tool on the opening greeting and hung up on the
+        # customer mid-pitch; the state machine said the conversation wasn't over.
+        if end_call and not dnc_recorded and not self._state_machine.script.is_closing_state(proposal.state):
+            logger.warning("end_call_refused_not_closing_state", extra={"proposed_state": proposal.state})
+            end_call = False
 
         previous_state = self._state_machine.current_state
         self._state_machine.transition_to(proposal.state)
@@ -143,9 +190,80 @@ class ConversationEngine:
             used_fallback=outcome.used_fallback,
         )
 
+    async def _handle_dnc_request(
+        self,
+        *,
+        session: AsyncSession,
+        tenant_id: UUID,
+        campaign_id: UUID,
+        lead_id: UUID,
+        conversation_id: UUID,
+        customer_text: str,
+        customer_turn_index: int,
+        on_speech_ready: OnSpeechReady | None,
+    ) -> TurnResult:
+        """DNC backstop (CLAUDE.md rule 3): the customer used a configured do-not-call
+        phrase, so the application handles the turn itself instead of trusting the LLM
+        to call mark_dnc (small local models were seen not to). Speaks DO_NOT_CALL's
+        configured line first — same speech-before-tools order as every turn — then
+        records the suppression and ends the call."""
+        script = self._state_machine.script
+        speech = script.fallback_for("DO_NOT_CALL", self._context.lead_fields)
+        if on_speech_ready is not None:
+            await on_speech_ready(speech)
+
+        ctx = ToolContext(
+            session=session,
+            tenant_id=tenant_id,
+            campaign_id=campaign_id,
+            lead_id=lead_id,
+            conversation_id=conversation_id,
+            script_version=script.version,
+            current_state="DO_NOT_CALL",
+            allowed_tools=frozenset(script.allowed_tools("DO_NOT_CALL")),
+        )
+        result = await self._tools.invoke(ctx, "mark_dnc", {"reason": "customer_request"})
+        if not result.success:
+            # Still end the call (the customer asked us to stop), but this must be seen.
+            logger.error("dnc_backstop_mark_dnc_failed", extra={"tool_message": result.message})
+        logger.info("dnc_backstop_triggered", extra={"conversation_id": str(conversation_id)})
+
+        proposal = AgentResponseProposal(
+            state="DO_NOT_CALL",
+            speech=speech,
+            intent="do_not_call_request",
+            extracted_facts={"do_not_call": True},
+            tool_call=ToolCallProposal(name="mark_dnc", arguments={"reason": "customer_request"}),
+            end_call=True,
+        )
+        self._context.merge_facts(proposal.extracted_facts)
+        previous_state = self._state_machine.current_state
+        self._state_machine.transition_to("DO_NOT_CALL")
+        self._context.current_state = self._state_machine.current_state
+        self._context.append_turn("agent", speech, self._state_machine.current_state)
+        self._persist_turns_fire_and_forget(
+            customer_text=customer_text,
+            customer_turn_index=customer_turn_index,
+            agent_turn_index=len(self._context.history) - 1,
+            previous_state=previous_state,
+            proposal=proposal,
+        )
+        return TurnResult(speech=speech, end_call=True, new_state="DO_NOT_CALL", tool_result_summary=result.message)
+
+    def _turn_schema(self, customer_spoke: bool = True) -> dict:
+        """The structured-output schema for this turn. Before the customer has said
+        anything, the only valid state is the current one and the only intent is
+        "no_customer_message_yet" — there is nothing to classify or react to."""
+        if not customer_spoke:
+            return build_agent_response_schema([self._state_machine.current_state], ["no_customer_message_yet"])
+        return build_agent_response_schema(
+            sorted(self._state_machine.allowed_next_states()), self._state_machine.intent_options()
+        )
+
     async def _propose_and_validate(
-        self, messages, on_speech_ready: OnSpeechReady | None
+        self, messages, on_speech_ready: OnSpeechReady | None, schema: dict | None = None
     ) -> ValidationOutcome:
+        schema = schema or self._turn_schema()
         # One deadline for the whole turn, shared by the streaming attempt and the
         # plain-path retry. They used to get llm_timeout_seconds each, so a stream that
         # timed out was retried for the full timeout again — ~17 s of dead air
@@ -153,7 +271,7 @@ class ConversationEngine:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self._settings.llm_timeout_seconds
         if self._settings.enable_speculative_tts:
-            outcome = await self._propose_and_validate_streaming(messages, on_speech_ready)
+            outcome = await self._propose_and_validate_streaming(messages, on_speech_ready, schema)
             if outcome is not None:
                 return outcome
             # `None` means the streaming attempt failed before anything was spoken —
@@ -168,7 +286,7 @@ class ConversationEngine:
             if remaining <= 0:
                 raise asyncio.TimeoutError("LLM deadline already spent by the streaming attempt")
             proposal_raw = await asyncio.wait_for(
-                self._llm.propose(messages, build_agent_response_schema(sorted(self._state_machine.allowed_next_states()))),
+                self._llm.propose(messages, schema),
                 timeout=remaining,
             )
         except Exception as exc:  # noqa: BLE001 - any transport failure (incl. timeout) degrades safely
@@ -184,7 +302,7 @@ class ConversationEngine:
         return outcome
 
     async def _propose_and_validate_streaming(
-        self, messages, on_speech_ready: OnSpeechReady | None
+        self, messages, on_speech_ready: OnSpeechReady | None, schema: dict | None = None
     ) -> ValidationOutcome | None:
         """Returns None only when it is safe for the caller to retry from scratch via
         the plain non-streaming path — i.e. only when `on_speech_ready` was never
@@ -198,9 +316,7 @@ class ConversationEngine:
 
         async def _consume() -> None:
             nonlocal speech_delivered
-            async for delta in self._llm.propose_stream(
-                messages, build_agent_response_schema(sorted(self._state_machine.allowed_next_states()))
-            ):
+            async for delta in self._llm.propose_stream(messages, schema or self._turn_schema()):
                 chunks.append(delta)
                 extractor.feed(delta)
                 if not speech_delivered and extractor.speech_ready:
@@ -317,7 +433,10 @@ class ConversationEngine:
                         turn_index=agent_turn_index,
                         speaker="agent",
                         state=previous_state,
-                        intent=proposal.intent,
+                        # The column is VARCHAR(100); a model that writes a sentence
+                        # here (seen with small local models) used to make the whole
+                        # turn's transcript write fail.
+                        intent=(proposal.intent or "")[:100] or None,
                         raw_llm_output=proposal.model_dump(),
                     )
                     bg_session.add(agent_turn)

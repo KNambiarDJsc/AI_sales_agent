@@ -37,6 +37,19 @@ def _pcm16_to_wav_bytes(pcm16_data: bytes) -> bytes:
     return buffer.getvalue()
 
 
+async def transcribe_pcm16_openai(
+    pcm16: bytes, model: str, language: str = "", client: AsyncOpenAI | None = None
+) -> str:
+    """One utterance of PCM16 16 kHz mono → text via the REST transcription endpoint."""
+    audio_file = io.BytesIO(_pcm16_to_wav_bytes(pcm16))
+    audio_file.name = "turn.wav"
+    extra = {"language": language} if language else {}
+    response = await (client or get_openai_client()).audio.transcriptions.create(
+        model=model, file=audio_file, response_format="json", **extra
+    )
+    return (getattr(response, "text", "") or "").strip()
+
+
 class OpenAISTTStream(STTStream):
     def __init__(self, client: AsyncOpenAI | None, model: str, language: str = ""):
         self._client = client
@@ -56,21 +69,12 @@ class OpenAISTTStream(STTStream):
     async def receive_final(self) -> TranscriptResult | None:
         if not self._buffer:
             return None
-        wav_bytes = _pcm16_to_wav_bytes(bytes(self._buffer))
+        pcm = bytes(self._buffer)
         self._buffer.clear()
-        audio_file = io.BytesIO(wav_bytes)
-        audio_file.name = "turn.wav"
-        extra = {"language": self._language} if self._language else {}
-        response = await (self._client or get_openai_client()).audio.transcriptions.create(
-            model=self._model,
-            file=audio_file,
-            response_format="json",
-            **extra,
-        )
-        text = getattr(response, "text", "") or ""
-        if not text.strip():
+        text = await transcribe_pcm16_openai(pcm, self._model, self._language, self._client)
+        if not text:
             return None
-        return TranscriptResult(text=text.strip(), is_final=True)
+        return TranscriptResult(text=text, is_final=True)
 
     async def close(self) -> None:
         self._closed = True

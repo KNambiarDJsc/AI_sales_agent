@@ -55,6 +55,46 @@ class Settings(BaseSettings):
     # that language). Empty = auto-detect.
     stt_language: str = "en"
 
+    # --- AI backend: OpenAI, or local models on this machine ---
+    # "auto": OpenAI when its key works; each component (STT/LLM/TTS) falls back to
+    #         the local model by itself the moment OpenAI refuses for an account
+    #         reason (missing/invalid/expired key, no credits) — mid-call, same turn —
+    #         and OpenAI is retried after `openai_retry_after_seconds`.
+    # "openai": OpenAI only.   "local": local models only (no OpenAI calls at all).
+    ai_backend: Literal["auto", "openai", "local"] = "auto"
+    openai_retry_after_seconds: float = 300.0
+    # Local LLM: Ollama's native API (structured output via a JSON-schema `format`,
+    # plus control over context size and keeping the model resident in memory).
+    local_llm_base_url: str = "http://127.0.0.1:11434"
+    # Chosen by running whole scripted calls (interested / callback / not interested /
+    # DNC) through the real engine on the dev laptop (Core Ultra 7 256V, Ollama on the
+    # Arc GPU): llama3.2:3b passed 3/4, reply ready ~2.2 s median (3.2 s p90).
+    # qwen2.5:1.5b and qwen3:1.7b passed 2/4 — and the 1.5B put an *interested* lead on
+    # do-not-call; qwen3:4b 2/4 at ~3.8 s. qwen2.5:3b's licence is research-only (not for
+    # client use). Bigger/faster hardware: re-run the comparison before changing this.
+    local_llm_model: str = "llama3.2:3b"
+    local_llm_num_ctx: int = 8192  # Ollama's default would silently truncate long calls
+    # Reasoning ("thinking") models such as qwen3 think before answering unless told
+    # not to — seconds of silence on a phone call. False turns it off; None sends
+    # nothing (for models without a thinking mode).
+    local_llm_think: bool | None = False
+    local_llm_temperature: float = 0.3
+    local_llm_timeout_seconds: float = 20.0
+    # Where local model files live (Kokoro ONNX weights + voices). Moonshine and Ollama
+    # keep their own caches. `python scripts/setup_local_models.py` fills all three.
+    local_models_dir: str = str(REPO_ROOT / "models")
+    # Local TTS: Kokoro-82M, ONNX build (same model as `pip install kokoro`, but loads in
+    # ~2 s instead of ~27 s for PyTorch, at the same speed). 24 kHz, like OpenAI TTS.
+    local_tts_voice: str = "af_heart"
+    local_tts_lang: str = "en-us"
+    local_tts_speed: float = 1.0
+    # Local STT: Moonshine ONNX (useful-moonshine-onnx). Measured: base 0.23 s / 0.78 s /
+    # 1.09 s for 1.5 / 6 / 8 s of speech; tiny ~2x faster but less accurate.
+    local_stt_model: Literal["tiny", "base"] = "base"
+    # Load local models at server start, so the first local reply isn't slowed by
+    # model loading (Kokoro/Moonshine load, Ollama model into memory).
+    local_preload: bool = True
+
     # STT backend: "buffered" (speech/stt/openai.py, REST, per-utterance — reliable,
     # zero surprises) or "realtime" (speech/stt/openai_realtime.py, genuine streaming
     # partials + fast finals via a websocket — confirmed working against a live key,

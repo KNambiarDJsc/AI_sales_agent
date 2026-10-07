@@ -1,0 +1,11 @@
+# Local AI backup (used when OpenAI isn't available; see AI_BACKEND in .env.example).
+# Install on top of requirements.txt, then run: python scripts/setup_local_models.py
+#
+# - Kokoro-82M TTS via ONNX Runtime (same model as `pip install kokoro`, without PyTorch:
+#   loads in ~2 s instead of ~27 s, same speed).
+# - Moonshine STT via ONNX Runtime. NOTE: the PyPI package called just `moonshine` is an
+#   unrelated satellite-imagery library — the speech model is `useful-moonshine-onnx`.
+# - The LLM runs in Ollama (separate install: https://ollama.com/download).
+kokoro-onnx==0.6.1
+useful-moonshine-onnx==20251121
+onnxruntime>=1.20

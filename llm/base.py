@@ -30,6 +30,11 @@ class LLMProposal:
 
 
 class LLMProvider(ABC):
+    # "openai" | "local" — which backend answered the latest request. The engine uses
+    # it for one decision (a local model's do-not-call guess needs the customer's own
+    # words to back it up — see orchestrator/engine.py); fallback providers update it.
+    backend: str = "openai"
+
     @abstractmethod
     async def propose(
         self,

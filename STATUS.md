@@ -4,6 +4,57 @@ Last updated: 2026-10-02 (Exotel media route pass). Read this before adding anyt
 it tracks what's real vs. placeholder, and what happens when client materials (code,
 prompts, scripts, credentials, models) arrive.
 
+## Local AI backup — works without an OpenAI key (2026-10-07)
+
+`AI_BACKEND=auto` (default): each stage uses OpenAI while its key works and switches
+to a local model on its own — mid-call, same turn — when OpenAI refuses for an
+account reason (missing/invalid/expired key, no credits) or the network is down;
+OpenAI is retried after 5 min. `local` = never call OpenAI; `openai` = OpenAI only.
+`GET /health/ai` shows which backend each stage uses and whether the backup is ready.
+Setup on a new machine: `pip install -r requirements-local.txt`, install Ollama, then
+`python scripts/setup_local_models.py`.
+
+| Stage | Local model | Measured here (Core Ultra 7 256V, 16 GB, Arc iGPU) |
+|---|---|---|
+| STT | Moonshine base, ONNX (`useful-moonshine-onnx`) | 0.14–0.55 s per turn (OpenAI ~0.8 s) |
+| TTS | Kokoro-82M, ONNX (`kokoro-onnx`), voice af_heart | first audio 0.4–1.0 s (OpenAI ~0.9 s) |
+| LLM | llama3.2:3b in Ollama (on the Arc GPU) | reply ready 2.3–4.9 s (OpenAI gpt-4.1-mini ~1.0 s) |
+
+End-to-end in the real `/demo` page, fully local: **2.9–6.2 s** from the end of the
+customer's speech to agent audio (OpenAI path: ~2.9 s). Speech is faster than OpenAI;
+the LLM on an integrated GPU is the bottleneck. A machine with a discrete GPU would
+change this — re-run the model comparison there.
+
+LLM chosen by running four scripted calls through the real engine: llama3.2:3b 3/4
+(2.2 s median); qwen2.5:1.5b and qwen3:1.7b 2/4; qwen3:4b 2/4 at ~3.8 s; qwen2.5:3b
+excluded (research-only licence). phi4-mini and gemma3:4b were downloaded but their
+run was stopped by the OS for low memory — not yet compared.
+
+Guardrails added because small local models broke them (all config-driven, all
+apply to every backend unless noted, all tested):
+- **DNC backstop**: configured phrases (`dnc_phrases` in the script YAML) record DNC
+  and end the call without asking the LLM. With the *local* LLM this is the only way
+  to DNC — its DNC guesses are refused (it suppressed customers who'd asked for a call
+  back). OpenAI models' DNC judgement is still honoured.
+- **Hang-up only from a closing state** (END, DO_NOT_CALL, or a state whose only exit
+  is END — derived from the script).
+- **Nothing changes before the customer speaks** (opening line / silence re-prompt):
+  state pinned, no tools — a local model proposed DO_NOT_CALL + mark_dnc on the greeting.
+- **Intent first**: the model classifies the customer's reply into the script's own
+  transition labels before choosing the state; without it every local model stayed
+  in INTRO forever. Prompt now spells out label → state, and that the lead is the
+  person being called (a model introduced itself with the customer's name).
+- `Turn.intent` truncated to its 100-char column (a long intent used to make the
+  whole turn's transcript write fail).
+
+Also: the browser demo now captures raw 16 kHz PCM (AudioWorklet) instead of webm —
+what both STT backends take, and no encode/decode step.
+
+**Known gaps (local backend)**: the local LLM sends `create_qualification` with empty
+arguments, so qualification isn't recorded on the local path; it repeats itself more
+than OpenAI; latency above. Note `pip install moonshine` is an unrelated satellite-
+imagery package — the speech model is `useful-moonshine-onnx`.
+
 ## Latency + browser demo pass (2026-10-03)
 
 Measured end-to-end in the real `/demo` page (Chrome, push-to-talk; release of the

@@ -136,6 +136,27 @@ states:
     objective: "Terminal state."
     allowed_tools: []
 
+# Deterministic do-not-call backstop (CLAUDE.md rule 3: DNC always wins). If the
+# customer's words match any of these (case-insensitive regular expressions), the
+# application records DNC itself, says DO_NOT_CALL's fallback_response, and ends the
+# call — without asking the LLM, which may forget to call mark_dnc (seen with small
+# local models). Kept specific on purpose: "don't call me now, call me later" must
+# NOT match.
+#
+# With the LOCAL LLM backend these phrases are the only way a call reaches
+# DO_NOT_CALL: small local models were seen proposing DNC for customers who wanted a
+# call back, so their DNC guesses are refused (orchestrator/engine.py). Keep this list
+# broad enough to catch real requests in the words customers actually use.
+dnc_phrases:
+  - '\b(stop|quit) (calling|ringing|phoning|contacting|bothering|messaging|texting|harass\w*)\b'
+  - '\bdo ?n[o''`’]?t (ever )?(call|ring|phone|message|text) (me|us|this number|here)( ever)? (again|anymore|any more)\b'
+  - '\bdo ?n[o''`’]?t (ever )?(contact|bother|harass) (me|us)\b'
+  - '\bnever (call|ring|phone|contact) (me|us|this number|here|again)\b'
+  - '\b(remove|delete|take|strike) (me|us|my number|our number|this number|my name)( off| from| out of)? (your|the|this|all) (list|lists|database|records|calling list)\b'
+  - '\b(do[- ]?not[- ]?call|don''t call|dnc|dnd) (list|registry|register)\b'
+  - '\b(unsubscribe|opt me out|opt out of (these|your) calls)\b'
+  - '\b(i|we) (do ?n[o''`’]?t|never) want (any )?(more )?(calls|to be called|you to call)\b(?! (right )?now| today| at the moment| this (week|month))'
+
 max_call_duration_seconds: 420   # PLACEHOLDER — confirm with client
 retry_limits:
   per_question: 2

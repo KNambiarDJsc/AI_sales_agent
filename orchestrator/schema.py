@@ -123,7 +123,7 @@ AGENT_RESPONSE_JSON_SCHEMA: dict = {
 }
 
 
-def build_agent_response_schema(allowed_states: list[str]) -> dict:
+def build_agent_response_schema(allowed_states: list[str], intent_options: list[str] | None = None) -> dict:
     """The real per-turn schema: AGENT_RESPONSE_JSON_SCHEMA with `state` constrained to
     an enum of exactly the states reachable from wherever the conversation is right
     now (`ScriptConfig.allowed_next_states(current_state)` — current state + global
@@ -133,9 +133,27 @@ def build_agent_response_schema(allowed_states: list[str]) -> dict:
     reach yet — both caught live, both previously only caught after the fact by
     validator.py, which meant a full wasted turn (and, in the skip-ahead case, the
     conversation stuck re-asking the same fallback question forever, since every
-    retry proposed the same disallowed skip again)."""
+    retry proposed the same disallowed skip again).
+
+    With `intent_options` (the current state's `transitions_on` labels, e.g.
+    "confirmed_identity", plus "other"), `intent` becomes an enum and is generated
+    *first*: structured output is produced field by field in schema order, so a model
+    that has to commit to `state` before saying anything about what the customer meant
+    tends to just repeat the current state — every local model tested stayed in INTRO
+    after "Yes, this is Naman". Classifying the reply first, in the script's own
+    vocabulary, makes the state choice follow from it. A few extra tokens, and
+    `state` still precedes `speech` (speculative TTS gates on it)."""
     schema = json.loads(json.dumps(AGENT_RESPONSE_JSON_SCHEMA))  # cheap deep copy, no extra dependency
     schema["properties"]["state"] = {"type": "string", "enum": list(allowed_states)}
+    if intent_options:
+        props = schema["properties"]
+        props["intent"] = {
+            "type": "string",
+            "enum": list(intent_options),
+            "description": "What the customer's latest message means, using the labels in 'How to choose the next state'.",
+        }
+        schema["properties"] = {"intent": props.pop("intent"), **props}
+        schema["required"] = ["intent"] + [k for k in schema["required"] if k != "intent"]
     return schema
 
 

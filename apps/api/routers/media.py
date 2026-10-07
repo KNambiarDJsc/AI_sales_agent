@@ -36,13 +36,13 @@ from database.models import CallAttempt, Campaign, Conversation, Lead
 from database.repositories.call_repository import CallRepository
 from database.session import session_scope
 from services.call_worker.lifecycle import finalize_call
-from llm.openai import OpenAILLMProvider
+from llm.factory import get_llm_provider
 from orchestrator.context import ConversationContext
 from orchestrator.engine import ConversationEngine
 from orchestrator.prompts import load_campaign_prompt
 from orchestrator.state_machine import StateMachine, load_script_by_id
 from speech.stt.factory import get_stt_provider
-from speech.tts.openai import OpenAITTSProvider
+from speech.tts.factory import get_tts_provider
 from telephony.base import TelephonyProvider
 from telephony.factory import get_telephony_provider
 from voice.audio.processing import TELEPHONY_SAMPLE_RATE_HZ
@@ -104,7 +104,7 @@ async def _resolve_attempt_and_build_session(
 
     telephony = get_telephony_provider(telephony_provider_name)
     state_machine = StateMachine(script, current_state="INTRO")
-    engine = ConversationEngine(OpenAILLMProvider(), state_machine, context)
+    engine = ConversationEngine(get_llm_provider(), state_machine, context)
 
     identity = SessionIdentity(
         provider_call_id=provider_call_id_val,
@@ -117,7 +117,7 @@ async def _resolve_attempt_and_build_session(
         identity=identity,
         telephony=telephony,
         stt_provider=get_stt_provider(),
-        tts_provider=OpenAITTSProvider(),
+        tts_provider=get_tts_provider(),
         engine=engine,
         session_factory=session_scope,
     )
