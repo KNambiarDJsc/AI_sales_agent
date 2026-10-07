@@ -19,6 +19,7 @@ import wave
 from openai import AsyncOpenAI
 
 from config.settings import get_settings
+from llm.openai_client import get_openai_client
 from speech.stt.base import STTProvider, STTStream, TranscriptResult
 
 _SAMPLE_RATE_HZ = 16000
@@ -37,9 +38,10 @@ def _pcm16_to_wav_bytes(pcm16_data: bytes) -> bytes:
 
 
 class OpenAISTTStream(STTStream):
-    def __init__(self, client: AsyncOpenAI, model: str):
+    def __init__(self, client: AsyncOpenAI | None, model: str, language: str = ""):
         self._client = client
         self._model = model
+        self._language = language
         self._buffer = bytearray()
         self._closed = False
 
@@ -58,10 +60,12 @@ class OpenAISTTStream(STTStream):
         self._buffer.clear()
         audio_file = io.BytesIO(wav_bytes)
         audio_file.name = "turn.wav"
-        response = await self._client.audio.transcriptions.create(
+        extra = {"language": self._language} if self._language else {}
+        response = await (self._client or get_openai_client()).audio.transcriptions.create(
             model=self._model,
             file=audio_file,
             response_format="json",
+            **extra,
         )
         text = getattr(response, "text", "") or ""
         if not text.strip():
@@ -76,8 +80,9 @@ class OpenAISTTStream(STTStream):
 class OpenAISTTProvider(STTProvider):
     def __init__(self) -> None:
         settings = get_settings()
-        self._client = AsyncOpenAI(api_key=settings.openai_api_key)
         self._model = settings.openai_stt_model
+        self._language = settings.stt_language
 
     async def start_stream(self) -> STTStream:
-        return OpenAISTTStream(self._client, self._model)
+        # Shared, connection-pooled client (llm/openai_client.py), resolved per call.
+        return OpenAISTTStream(None, self._model, self._language)

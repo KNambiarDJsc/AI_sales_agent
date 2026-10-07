@@ -86,6 +86,13 @@ async def dispatch_next_call(
         # — idempotency guard (Section 19). Not an error, just a race we lost.
         await session.rollback()
         return False
+    # Commit before dialling: once the provider has the call, it calls back into us
+    # (FreJun's flow_url, every provider's media WebSocket, status webhooks) on other
+    # sessions, and those must be able to see this attempt. Uncommitted, a callee who
+    # answers before this transaction ends gets a flow/media lookup miss and a dropped
+    # call. The lead is already status "queued", so releasing its row lock here can't
+    # let another worker claim it.
+    await session.commit()
 
     request = OutboundCallRequest(
         to_number=lead.phone_e164,
@@ -95,6 +102,7 @@ async def dispatch_next_call(
         attempt_number=attempt_number,
         media_websocket_url=f"{media_websocket_base_url}/{attempt.id}",
         status_callback_url=f"{status_callback_base_url}/{telephony.name}",
+        call_attempt_id=str(attempt.id),
     )
 
     try:

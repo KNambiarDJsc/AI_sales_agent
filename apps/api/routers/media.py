@@ -24,6 +24,7 @@ per Section 4's "keep the media layer and agent layer separate."
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 import logging
 import uuid
@@ -34,6 +35,7 @@ from config.settings import PROMPTS_DIR
 from database.models import CallAttempt, Campaign, Conversation, Lead
 from database.repositories.call_repository import CallRepository
 from database.session import session_scope
+from services.call_worker.lifecycle import finalize_call
 from llm.openai import OpenAILLMProvider
 from orchestrator.context import ConversationContext
 from orchestrator.engine import ConversationEngine
@@ -43,6 +45,7 @@ from speech.stt.factory import get_stt_provider
 from speech.tts.openai import OpenAITTSProvider
 from telephony.base import TelephonyProvider
 from telephony.factory import get_telephony_provider
+from voice.audio.processing import TELEPHONY_SAMPLE_RATE_HZ
 from voice.session.session import SessionIdentity, VoiceSession
 
 logger = logging.getLogger(__name__)
@@ -51,7 +54,7 @@ router = APIRouter(tags=["media"])
 
 async def _resolve_attempt_and_build_session(
     *, attempt_id: uuid.UUID | None = None, provider_call_id: str | None = None
-) -> tuple[VoiceSession, SessionIdentity, TelephonyProvider, uuid.UUID] | None:
+) -> tuple[VoiceSession, SessionIdentity, TelephonyProvider, uuid.UUID, uuid.UUID] | None:
     """Shared setup for both routes: resolve the CallAttempt (by its own id, or by the
     provider's call_sid for Exotel), load campaign/lead, and build a fully-wired
     VoiceSession. Returns None if the attempt/campaign/lead can't be resolved."""
@@ -95,7 +98,7 @@ async def _resolve_attempt_and_build_session(
             campaign_prompt=campaign_prompt,
             timezone=campaign.timezone,
         )
-        tenant_id, campaign_id_val, lead_id_val = campaign.tenant_id, campaign.id, lead.id
+        tenant_id, campaign_id_val, lead_id_val, attempt_id_val = campaign.tenant_id, campaign.id, lead.id, attempt.id
         telephony_provider_name = campaign.telephony_provider
         provider_call_id_val = attempt.provider_call_id or provider_call_id or ""
 
@@ -119,16 +122,22 @@ async def _resolve_attempt_and_build_session(
         session_factory=session_scope,
     )
     await voice_session.start()
-    return voice_session, identity, telephony, conversation_id
+    return voice_session, identity, telephony, conversation_id, attempt_id_val
 
 
-async def _teardown(telephony: TelephonyProvider, provider_call_id: str, conversation_id: uuid.UUID) -> None:
+async def _teardown(
+    telephony: TelephonyProvider, provider_call_id: str, attempt_id: uuid.UUID, voice_session: VoiceSession
+) -> None:
     try:
         telephony.unregister_stream(provider_call_id)
     except NotImplementedError:
         pass
     async with session_scope() as session:
-        await CallRepository(session).close_conversation(conversation_id, reason="media_stream_ended")
+        # Closes the conversation (with its final state) and moves the lead out of
+        # in_progress; the status webhook may run the same finalization — idempotent.
+        await finalize_call(
+            session, attempt_id, ended_reason="media_stream_ended", final_state=voice_session.conversation_state
+        )
 
 
 @router.websocket("/media/exotel")
@@ -175,7 +184,7 @@ async def exotel_media_stream(websocket: WebSocket) -> None:
         logger.warning("exotel_media_stream_unknown_call_sid", extra={"call_sid": call_sid})
         await websocket.close(code=4404)
         return
-    voice_session, identity, telephony, conversation_id = resolved
+    voice_session, identity, telephony, conversation_id, attempt_id = resolved
     identity.provider_call_id = call_sid
     telephony.register_stream(call_sid, stream_sid, websocket.send_text)
     await voice_session.speak_opening_line()
@@ -197,7 +206,98 @@ async def exotel_media_stream(websocket: WebSocket) -> None:
         logger.info("exotel_media_stream_disconnected", extra={"call_sid": call_sid})
     finally:
         await voice_session.close()
-        await _teardown(telephony, call_sid, conversation_id)
+        await _teardown(telephony, call_sid, attempt_id, voice_session)
+
+
+@router.websocket("/media/frejun/{call_attempt_id}")
+async def frejun_media_stream(websocket: WebSocket, call_attempt_id: uuid.UUID) -> None:
+    """FreJun/Teler media stream (docs: media-streaming/websocket-protocol).
+
+    Teler connects here because our flow endpoint (`apps/api/routers/flows.py`)
+    returned this URL — with our CallAttempt id in the path, so correlation is by our
+    own id; the `call_id` in Teler's `start` message is then checked against the id
+    the initiate call returned.
+
+    Wire protocol, translated to/from VoiceSession and nothing more:
+    - in `start`: `{type, call_id, stream_id, data: {encoding: "audio/l16",
+      sample_rate: 8000, channels: 1}}` — always first; anything else is rejected.
+    - in `audio`: `{type, stream_id, message_id, data: {audio_b64}}` — 16-bit
+      linear PCM, mono, 8 kHz → `VoiceSession.handle_inbound_audio` (pcm16 path).
+    - out `audio` / `clear`: built by `telephony/frejun.py:send_audio/clear_audio`.
+
+    Unlike the other routes, this one closes the socket itself once the agent ends
+    the call, so the stream (and Teler's side of it) ends even if the hangup API
+    call couldn't be made."""
+    await websocket.accept()
+
+    try:
+        start = json.loads(await websocket.receive_text())
+    except WebSocketDisconnect:
+        return
+    except json.JSONDecodeError:
+        await websocket.close(code=4400)
+        return
+    if not isinstance(start, dict) or start.get("type") != "start":
+        logger.warning("frejun_media_stream_unexpected_first_message", extra={"msg_type": str(start)[:40]})
+        await websocket.close(code=4400)
+        return
+
+    fmt = start.get("data") or {}
+    encoding = fmt.get("encoding", "audio/l16")
+    sample_rate = int(fmt.get("sample_rate", TELEPHONY_SAMPLE_RATE_HZ))
+    channels = int(fmt.get("channels", 1))
+    if encoding != "audio/l16" or sample_rate != TELEPHONY_SAMPLE_RATE_HZ or channels != 1:
+        # Our pcm16 path assumes exactly this; decoding anything else as if it were
+        # would feed noise to VAD/STT for the whole call. Refuse loudly instead.
+        logger.error(
+            "frejun_media_stream_unsupported_format",
+            extra={"encoding": encoding, "sample_rate": sample_rate, "channels": channels},
+        )
+        await websocket.close(code=4415)
+        return
+
+    call_id = str(start.get("call_id") or "")
+    stream_id = str(start.get("stream_id") or "")
+    resolved = await _resolve_attempt_and_build_session(attempt_id=call_attempt_id)
+    if resolved is None:
+        logger.warning("frejun_media_stream_unknown_attempt", extra={"call_attempt_id": str(call_attempt_id)})
+        await websocket.close(code=4404)
+        return
+    voice_session, identity, telephony, conversation_id, attempt_id = resolved
+    if identity.provider_call_id and call_id and identity.provider_call_id != call_id:
+        logger.warning(
+            "frejun_media_stream_call_id_mismatch",
+            extra={"call_attempt_id": str(call_attempt_id), "call_id": call_id},
+        )
+        await voice_session.close()
+        await _teardown(telephony, identity.provider_call_id, attempt_id, voice_session)
+        await websocket.close(code=4403)
+        return
+    identity.provider_call_id = call_id or identity.provider_call_id
+    telephony.register_stream(identity.provider_call_id, stream_id, websocket.send_text)
+    logger.info(
+        "frejun_media_stream_started",
+        extra={"call_attempt_id": str(call_attempt_id), "call_id": call_id, "stream_id": stream_id},
+    )
+
+    disconnected = False
+    try:
+        await voice_session.speak_opening_line()
+        while not voice_session.ended:
+            message = json.loads(await websocket.receive_text())
+            if message.get("type") == "audio":
+                payload_b64 = (message.get("data") or {}).get("audio_b64", "")
+                if payload_b64:
+                    await voice_session.handle_inbound_audio(base64.b64decode(payload_b64))
+    except WebSocketDisconnect:
+        disconnected = True
+        logger.info("frejun_media_stream_disconnected", extra={"call_id": call_id})
+    finally:
+        await voice_session.close()
+        await _teardown(telephony, identity.provider_call_id, attempt_id, voice_session)
+        if not disconnected:
+            with contextlib.suppress(Exception):
+                await websocket.close(code=1000)
 
 
 @router.websocket("/media/{call_attempt_id}")
@@ -218,7 +318,7 @@ async def media_stream(websocket: WebSocket, call_attempt_id: uuid.UUID) -> None
         logger.warning("media_stream_unknown_attempt", extra={"call_attempt_id": str(call_attempt_id)})
         await websocket.close(code=4404)
         return
-    voice_session, identity, telephony, conversation_id = resolved
+    voice_session, identity, telephony, conversation_id, attempt_id = resolved
 
     try:
         while True:
@@ -245,4 +345,4 @@ async def media_stream(websocket: WebSocket, call_attempt_id: uuid.UUID) -> None
         logger.info("media_stream_disconnected", extra={"call_attempt_id": str(call_attempt_id)})
     finally:
         await voice_session.close()
-        await _teardown(telephony, identity.provider_call_id, conversation_id)
+        await _teardown(telephony, identity.provider_call_id, attempt_id, voice_session)

@@ -38,10 +38,22 @@ class Settings(BaseSettings):
 
     # --- OpenAI ---
     openai_api_key: str = ""
-    openai_stt_model: str = "gpt-4o-transcribe"
+    # Defaults chosen by measurement on this project's real prompt/schema (2026-10-03,
+    # medians): LLM time-until-`speech`-is-ready gpt-4o 1.96s vs gpt-4.1-mini 0.84s
+    # (gpt-5.4-nano 0.80s, gpt-4.1-nano 0.87s — all schema-valid 4/4); STT
+    # gpt-4o-transcribe 0.94s vs gpt-4o-mini-transcribe 0.82s; TTS first audio
+    # gpt-4o-mini-tts 0.80s vs tts-1 1.43s. Re-measure before changing.
+    openai_stt_model: str = "gpt-4o-mini-transcribe"
     openai_tts_model: str = "gpt-4o-mini-tts"
     openai_tts_voice: str = "alloy"
-    openai_llm_model: str = "gpt-5.4-mini"
+    openai_llm_model: str = "gpt-4.1-mini"
+    # Only for reasoning models (gpt-5.x): "none"/"minimal" keeps them fast. Leave
+    # empty for gpt-4.x, which reject the parameter.
+    openai_llm_reasoning_effort: str = ""
+    # ISO-639-1 language the customer is transcribed in. Pinning it stops STT from
+    # "detecting" another language on noise or accents (and the LLM then answering in
+    # that language). Empty = auto-detect.
+    stt_language: str = "en"
 
     # STT backend: "buffered" (speech/stt/openai.py, REST, per-utterance — reliable,
     # zero surprises) or "realtime" (speech/stt/openai_realtime.py, genuine streaming
@@ -51,7 +63,14 @@ class Settings(BaseSettings):
     stt_backend: Literal["buffered", "realtime"] = "buffered"
 
     # --- Telephony ---
-    telephony_provider: Literal["twilio", "exotel", "freejun"] = "twilio"
+    telephony_provider: Literal["twilio", "exotel", "frejun"] = "twilio"
+
+    # Public HTTPS base URL this app is reachable at (tunnel in dev, real host in
+    # prod), e.g. "https://abc.trycloudflare.com". Every provider-facing URL is built
+    # from it: FreJun's flow_url/ws_url/status_callback_url and the worker's media/
+    # status-callback URLs. Falls back to TWILIO_WEBHOOK_BASE_URL, which used to carry
+    # this for every provider despite its name.
+    public_base_url: str = ""
 
     twilio_account_sid: str = ""
     twilio_auth_token: str = ""
@@ -65,9 +84,28 @@ class Settings(BaseSettings):
     exotel_caller_id: str = ""
     exotel_app_id: str = ""
 
-    freejun_api_key: str = ""
-    freejun_api_base_url: str = "https://api.frejun.ai/api/v1"
-    freejun_caller_id: str = ""  # a Teler virtual number on the account, E.164
+    # FreJun / Teler (https://frejun.com/docs/teler/). The API key is the account's
+    # single key (dashboard → Developers). The secret is the webhook signing secret
+    # set on the Voice App that owns FREJUN_FROM_NUMBER — Teler signs every webhook
+    # with it (HMAC-SHA256, X-Teler-Signature/X-Teler-Timestamp).
+    frejun_api_key: str = ""
+    frejun_api_base_url: str = "https://api.frejun.ai/api/v1"
+    frejun_secret: str = ""
+    frejun_from_number: str = ""  # E.164 Teler virtual number; must belong to a Voice App
+    # Stream flow options (docs: telephony/call-flows). The `start` message currently
+    # always advertises 8000 Hz regardless, so 8k is the honest setting. chunk_size is
+    # how much caller audio each inbound message carries (20..2000, multiple of 20):
+    # smaller means VAD/endpointing sees speech sooner, at the cost of more messages.
+    frejun_sample_rate: Literal["8k", "16k"] = "8k"
+    frejun_chunk_size_ms: int = Field(default=100, ge=20, le=2000, multiple_of=20)
+    # Teler-side call recording. Off by default: no consent/disclosure policy has
+    # been confirmed for this campaign (see STATUS.md placeholders).
+    frejun_record: bool = False
+    frejun_http_timeout_seconds: float = 10.0
+
+    @property
+    def effective_public_base_url(self) -> str:
+        return (self.public_base_url or self.twilio_webhook_base_url).rstrip("/")
 
     # --- Campaign defaults (client-confirmable; never assume silently in business logic) ---
     default_call_window_start: str = "09:00"

@@ -18,9 +18,8 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 
-from openai import AsyncOpenAI
-
 from config.settings import get_settings
+from llm.openai_client import get_openai_client
 from speech.tts.base import TTSProvider
 
 OPENAI_TTS_SAMPLE_RATE_HZ = 24000
@@ -29,7 +28,6 @@ OPENAI_TTS_SAMPLE_RATE_HZ = 24000
 class OpenAITTSProvider(TTSProvider):
     def __init__(self) -> None:
         settings = get_settings()
-        self._client = AsyncOpenAI(api_key=settings.openai_api_key)
         self._model = settings.openai_tts_model
         self._voice = settings.openai_tts_voice
         self._active_cancel_events: set[asyncio.Event] = set()
@@ -38,13 +36,16 @@ class OpenAITTSProvider(TTSProvider):
         cancel_event = asyncio.Event()
         self._active_cancel_events.add(cancel_event)
         try:
-            async with self._client.audio.speech.with_streaming_response.create(
+            async with get_openai_client().audio.speech.with_streaming_response.create(
                 model=self._model,
                 voice=self._voice,
                 input=text,
                 response_format="pcm",
             ) as response:
-                async for chunk in response.iter_bytes(chunk_size=4096):
+                # 1200 bytes = 25 ms of 24 kHz PCM16. A 4096-byte chunk held the first
+                # ~85 ms of audio back until it was full, adding that much latency to
+                # every reply before anything could play.
+                async for chunk in response.iter_bytes(chunk_size=1200):
                     if cancel_event.is_set():
                         break
                     if chunk:

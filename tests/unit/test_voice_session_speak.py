@@ -163,10 +163,13 @@ async def test_speak_paces_frames_in_real_time_instead_of_bursting():
     await session._speak("Hello there.")
 
     assert len(telephony.sent_at) >= 5
-    gaps = [b - a for a, b in zip(telephony.sent_at, telephony.sent_at[1:])]
-    # Each frame is ~20ms of audio; allow generous slack for test scheduling jitter,
-    # but a burst (the bug) would produce gaps near 0, not near 0.02s.
-    assert all(gap > 0.01 for gap in gaps), gaps
+    # Measure the whole send, not each gap: a burst (the bug) sends every frame in ~0s,
+    # while correct pacing spreads N frames over ~(N-1)*20ms. Per-gap checks were flaky
+    # on Windows, whose ~15.6ms sleep granularity makes individual gaps come out as 0ms
+    # or 31ms even when the average is exactly right.
+    expected = (len(telephony.sent_at) - 1) * 0.02
+    elapsed = telephony.sent_at[-1] - telephony.sent_at[0]
+    assert elapsed >= expected * 0.7, (elapsed, expected)
 
 
 async def test_speak_sends_pcm16_frames_for_a_pcm16_telephony_provider():

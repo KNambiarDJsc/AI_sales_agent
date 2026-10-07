@@ -56,9 +56,10 @@ FINAL_TRANSCRIPT_TIMEOUT_SECONDS = 10.0
 
 
 class OpenAIRealtimeSTTStream(STTStream):
-    def __init__(self, api_key: str, model: str):
+    def __init__(self, api_key: str, model: str, language: str = ""):
         self._api_key = api_key
         self._model = model
+        self._language = language
         self._ws: websockets.ClientConnection | None = None
         self._reader_task: asyncio.Task | None = None
         self._partial_text = ""
@@ -82,7 +83,7 @@ class OpenAIRealtimeSTTStream(STTStream):
                         "audio": {
                             "input": {
                                 "format": {"type": "audio/pcm", "rate": REALTIME_STT_SAMPLE_RATE_HZ},
-                                "transcription": {"model": self._model},
+                                "transcription": {"model": self._model, **({"language": self._language} if self._language else {})},
                                 "turn_detection": None,
                             }
                         },
@@ -163,8 +164,9 @@ class OpenAIRealtimeSTTProvider(STTProvider):
         settings = get_settings()
         self._api_key = settings.openai_api_key
         self._model = settings.openai_stt_model
+        self._language = settings.stt_language
 
     async def start_stream(self) -> STTStream:
-        stream = OpenAIRealtimeSTTStream(self._api_key, self._model)
+        stream = OpenAIRealtimeSTTStream(self._api_key, self._model, self._language)
         await stream.connect()
         return stream

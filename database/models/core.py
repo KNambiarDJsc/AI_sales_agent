@@ -156,7 +156,7 @@ class Callback(Base, UUIDPKMixin, TimestampMixin):
 
     lead_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("lead.id"), nullable=False, index=True)
     conversation_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("conversation.id"), nullable=True)
-    requested_time: Mapped[datetime | None] = mapped_column(nullable=True)
+    requested_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     timezone: Mapped[str] = mapped_column(String(50), default="Asia/Kolkata", nullable=False)
     status: Mapped[str] = mapped_column(String(30), default="pending", nullable=False)  # pending/completed/canceled
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -209,7 +209,7 @@ class OutboxEvent(Base, UUIDPKMixin, TimestampMixin):
     aggregate_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
     event_type: Mapped[str] = mapped_column(String(100), nullable=False)
     payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
-    processed_at: Mapped[datetime | None] = mapped_column(nullable=True, index=True)
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
 
 
 class AuditLog(Base, UUIDPKMixin, TimestampMixin):
@@ -231,4 +231,4 @@ class ExportJob(Base, UUIDPKMixin, TimestampMixin):
     status: Mapped[str] = mapped_column(String(30), default="pending", nullable=False)  # pending/running/done/failed
     file_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
     requested_by: Mapped[str] = mapped_column(String(255), nullable=False)
-    completed_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

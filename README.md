@@ -28,7 +28,7 @@ apps/api/            FastAPI app: campaign/lead/webhook endpoints
 services/             campaign, lead_import, call_worker domain logic
 voice/                realtime media: session, audio, VAD, turn-taking (NOT wired to a
                        real telephony stream yet — see STATUS.md)
-telephony/            TelephonyProvider + Freejun/Exotel/Twilio adapters
+telephony/            TelephonyProvider + FreJun (Teler)/Exotel/Twilio adapters
 speech/               STTProvider / TTSProvider + OpenAI adapters
 llm/                  LLM provider abstraction + OpenAI adapter
 orchestrator/         state machine, prompt assembly, LLM-output validator
@@ -56,8 +56,9 @@ uvicorn apps.api.main:app --reload
 
 ## What is NOT real yet
 
-- No telephony credentials are wired (Freejun has no public API docs yet — the adapter is
-  an interface stub only, per client instruction not to invent it).
+- FreJun (Teler) is the active telephony provider (`telephony/frejun.py`, built from
+  FreJun's official docs/SDK). A real call needs a Teler number attached to a Voice
+  App — see `STATUS.md` and `python scripts/frejun_call.py check`.
 - No client sales script / qualification thresholds — `config/scripts/product-a.yaml` and
   `config/qualification/rules.yaml` are illustrative placeholders for the Amazon-selling
   qualification use case, marked `PLACEHOLDER — replace with client script`.

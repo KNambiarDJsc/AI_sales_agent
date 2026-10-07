@@ -5,13 +5,13 @@ from functools import lru_cache
 from config.settings import get_settings
 from telephony.base import TelephonyProvider
 from telephony.exotel import ExotelProvider
-from telephony.freejun import FreejunProvider
+from telephony.frejun import FreJunProvider
 from telephony.twilio import TwilioProvider
 
 _PROVIDERS: dict[str, type[TelephonyProvider]] = {
     "twilio": TwilioProvider,
     "exotel": ExotelProvider,
-    "freejun": FreejunProvider,
+    "frejun": FreJunProvider,
 }
 
 
