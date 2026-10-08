@@ -45,6 +45,7 @@ from speech.stt.factory import get_stt_provider
 from speech.tts.factory import get_tts_provider
 from telephony.base import TelephonyProvider
 from telephony.factory import get_telephony_provider
+from telephony.vobiz import VobizProvider
 from voice.audio.processing import TELEPHONY_SAMPLE_RATE_HZ
 from voice.session.session import SessionIdentity, VoiceSession
 
@@ -292,6 +293,98 @@ async def frejun_media_stream(websocket: WebSocket, call_attempt_id: uuid.UUID) 
     except WebSocketDisconnect:
         disconnected = True
         logger.info("frejun_media_stream_disconnected", extra={"call_id": call_id})
+    finally:
+        await voice_session.close()
+        await _teardown(telephony, identity.provider_call_id, attempt_id, voice_session)
+        if not disconnected:
+            with contextlib.suppress(Exception):
+                await websocket.close(code=1000)
+
+
+@router.websocket("/media/vobiz/{call_attempt_id}/{token}")
+async def vobiz_media_stream(websocket: WebSocket, call_attempt_id: uuid.UUID, token: str) -> None:
+    """Vobiz bidirectional `<Stream>` (docs: xml/stream/stream-events,
+    concepts/streaming-websockets). Vobiz connects here because our answer endpoint
+    returned this URL — our CallAttempt id and per-call token in the path
+    (`telephony/vobiz.py:stream_url_for`); a wrong token is refused before anything
+    else happens.
+
+    Wire protocol, translated to/from VoiceSession and nothing more:
+    - in `start` (first message): `{sequenceNumber, event, start: {callId, streamId,
+      accountId, tracks, mediaFormat: {encoding: "audio/x-l16", sampleRate: 8000}},
+      extra_headers}`.
+    - in `media`: `{event, streamId, media: {track, timestamp, chunk, payload}}` —
+      base64 16-bit linear PCM, mono, 8 kHz → `VoiceSession.handle_inbound_audio`.
+    - in `playedStream` / `clearedAudio`: acknowledgements, ignored.
+    - out `playAudio` / `clearAudio`: built by `telephony/vobiz.py`.
+    Vobiz sends no inbound `stop`: the socket closing is the end of the stream. When
+    the agent ends the call, VoiceSession hangs up through the REST API and we close
+    the socket."""
+    telephony_check = get_telephony_provider("vobiz")
+    if not isinstance(telephony_check, VobizProvider) or not telephony_check.token_is_valid(str(call_attempt_id), token):
+        logger.warning("vobiz_media_stream_bad_token", extra={"call_attempt_id": str(call_attempt_id)})
+        await websocket.close(code=4403)
+        return
+    await websocket.accept()
+
+    try:
+        start = json.loads(await websocket.receive_text())
+    except WebSocketDisconnect:
+        return
+    except json.JSONDecodeError:
+        await websocket.close(code=4400)
+        return
+    if not isinstance(start, dict) or start.get("event") != "start":
+        logger.warning("vobiz_media_stream_unexpected_first_message", extra={"msg_type": str(start)[:40]})
+        await websocket.close(code=4400)
+        return
+
+    start_info = start.get("start") or {}
+    fmt = start_info.get("mediaFormat") or {}
+    encoding = str(fmt.get("encoding", ""))
+    sample_rate = int(fmt.get("sampleRate") or 0)
+    if encoding != "audio/x-l16" or sample_rate != TELEPHONY_SAMPLE_RATE_HZ:
+        # We asked for L16/8 kHz (<Stream contentType>); decoding anything else as if it
+        # were would feed noise to VAD/STT for the whole call. Refuse loudly instead.
+        logger.error("vobiz_media_stream_unsupported_format", extra={"encoding": encoding, "sample_rate": sample_rate})
+        await websocket.close(code=4415)
+        return
+
+    call_uuid = str(start_info.get("callId") or "")
+    stream_id = str(start_info.get("streamId") or "")
+    resolved = await _resolve_attempt_and_build_session(attempt_id=call_attempt_id)
+    if resolved is None:
+        logger.warning("vobiz_media_stream_unknown_attempt", extra={"call_attempt_id": str(call_attempt_id)})
+        await websocket.close(code=4404)
+        return
+    voice_session, identity, telephony, conversation_id, attempt_id = resolved
+    if identity.provider_call_id and call_uuid and identity.provider_call_id != call_uuid:
+        logger.warning(
+            "vobiz_media_stream_call_id_mismatch", extra={"call_attempt_id": str(call_attempt_id), "call_uuid": call_uuid}
+        )
+        await voice_session.close()
+        await _teardown(telephony, identity.provider_call_id, attempt_id, voice_session)
+        await websocket.close(code=4403)
+        return
+    identity.provider_call_id = call_uuid or identity.provider_call_id
+    telephony.register_stream(identity.provider_call_id, stream_id, websocket.send_text)
+    logger.info(
+        "vobiz_media_stream_started",
+        extra={"call_attempt_id": str(call_attempt_id), "call_uuid": call_uuid, "stream_id": stream_id},
+    )
+
+    disconnected = False
+    try:
+        await voice_session.speak_opening_line()
+        while not voice_session.ended:
+            message = json.loads(await websocket.receive_text())
+            if message.get("event") == "media":
+                payload_b64 = (message.get("media") or {}).get("payload", "")
+                if payload_b64:
+                    await voice_session.handle_inbound_audio(base64.b64decode(payload_b64))
+    except WebSocketDisconnect:
+        disconnected = True
+        logger.info("vobiz_media_stream_disconnected", extra={"call_uuid": call_uuid})
     finally:
         await voice_session.close()
         await _teardown(telephony, identity.provider_call_id, attempt_id, voice_session)

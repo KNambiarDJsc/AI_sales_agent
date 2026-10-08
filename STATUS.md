@@ -4,6 +4,42 @@ Last updated: 2026-10-07 (real-time speech + local tuning pass). Read this befor
 it tracks what's real vs. placeholder, and what happens when client materials (code,
 prompts, scripts, credentials, models) arrive.
 
+## Vobiz integration (2026-10-08, branch `naman-experiment`) — active provider; simulated calls pass, real call pending the owner's go-ahead
+
+Chosen after comparing providers for low cost / no business KYC for development:
+Vobiz lets an individual verify with PAN/Aadhaar (done on the owner's account), gives
+₹25 starter credit plus a trial number (outbound only; it's VOBIZ_FROM_NUMBER), and costs
+~₹0.38–0.45/min within India. `telephony/vobiz.py` is built only from Vobiz's
+official docs (full text: https://www.vobiz.ai/docs/llms-full.txt), same shape as the
+FreJun adapter: make-call API with `answer_url`/`hangup_url` → answer endpoint
+`/flow/vobiz/{attempt}` returns a bidirectional `<Stream>` → media WebSocket
+`/media/vobiz/{attempt}/{token}` (L16 8 kHz in, `playAudio`/`clearAudio` out) →
+hangup callback on `/webhooks/vobiz` → `finalize_call`. Every URL carries our own
+per-call HMAC token, because Vobiz only signs callbacks when credentials are set on
+the URL in its console (and then over URL + nonce only); a Vobiz signature that is
+present must also verify. `scripts/vobiz_call.py check|simulate|call|report`.
+
+Verified: 27 new tests (provider + DB-backed routes); live API check (credentials,
+₹25 balance, trial number active); `check` 11/11 PASS through a public tunnel;
+`simulate happy` — a full Vobiz-protocol conversation through the public URL, 2,383
+`playAudio` messages all well-formed, call ended and finalized.
+
+Found by the simulation and fixed: **local STT dropped the customer's first answer on
+the phone path.** The STT buffer holds the silence while the customer listened to the
+greeting, and Moonshine returns "" for an utterance with ~3–5 s of silence in front
+(push-to-talk in the browser demo never sends that silence). Leading/trailing
+silence is now trimmed before transcription (`speech/stt/moonshine_local.py:
+trim_silence`), tested with silence and line hiss.
+
+Watch-outs (from Vobiz's India docs): caller ID must be a Vobiz number (else hangup
+cause 3030); call media must stay in India — "media anchoring", cause 2070 — so the
+server must run in India (the dev laptop + Cloudflare tunnel does; a non-India cloud
+region would not). Their India page also says only India-registered *businesses* may
+rent numbers and run domestic calling: the owner's individual KYC is fine for
+development, but real campaigns need the client's business KYC, DLT registration and
+140-series numbers for promotional calls (TRAI). Not yet known: whether the trial
+number can call any number or only verified ones — the first real call will show.
+
 ## Local speed pass 2 + DNC speech fix (2026-10-08, branch `naman-experiment`)
 
 Browser demo, fully local, laptop still on battery (power-saving mode), browser

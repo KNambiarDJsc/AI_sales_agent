@@ -118,7 +118,7 @@ class Settings(BaseSettings):
     stt_backend: Literal["buffered", "realtime"] = "buffered"
 
     # --- Telephony ---
-    telephony_provider: Literal["twilio", "exotel", "frejun"] = "twilio"
+    telephony_provider: Literal["twilio", "exotel", "frejun", "vobiz"] = "twilio"
 
     # Public HTTPS base URL this app is reachable at (tunnel in dev, real host in
     # prod), e.g. "https://abc.trycloudflare.com". Every provider-facing URL is built
@@ -157,6 +157,16 @@ class Settings(BaseSettings):
     # been confirmed for this campaign (see STATUS.md placeholders).
     frejun_record: bool = False
     frejun_http_timeout_seconds: float = 10.0
+
+    # Vobiz (https://vobiz.ai/docs). Auth ID + Auth Token from the console dashboard.
+    # The token is also the key Vobiz signs callbacks with. VOBIZ_FROM_NUMBER must be a
+    # number rented from (or the trial number assigned by) Vobiz — any other caller ID
+    # fails with hangup cause 3030.
+    vobiz_auth_id: str = ""
+    vobiz_auth_token: str = ""
+    vobiz_api_base_url: str = "https://api.vobiz.ai/api/v1"
+    vobiz_from_number: str = ""
+    vobiz_http_timeout_seconds: float = 10.0
 
     @property
     def effective_public_base_url(self) -> str:

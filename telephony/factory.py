@@ -7,11 +7,13 @@ from telephony.base import TelephonyProvider
 from telephony.exotel import ExotelProvider
 from telephony.frejun import FreJunProvider
 from telephony.twilio import TwilioProvider
+from telephony.vobiz import VobizProvider
 
 _PROVIDERS: dict[str, type[TelephonyProvider]] = {
     "twilio": TwilioProvider,
     "exotel": ExotelProvider,
     "frejun": FreJunProvider,
+    "vobiz": VobizProvider,
 }
 
 

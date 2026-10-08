@@ -57,3 +57,36 @@ def test_kokoro_to_moonshine_round_trip():
     text = asyncio.run(run())
     for word in ("interested", "selling", "amazon"):
         assert word in text, text
+
+
+def test_trim_silence_keeps_the_speech_and_a_margin():
+    from speech.stt.moonshine_local import trim_silence
+
+    rate = 16000
+    speech = 0.3 * np.sin(np.linspace(0, 2000, rate))  # 1 s of "speech"
+    audio = np.concatenate([np.zeros(5 * rate), speech, np.zeros(2 * rate)]).astype(np.float32)
+    trimmed = trim_silence(audio)
+    assert 1.4 * rate <= len(trimmed) <= 1.8 * rate  # the speech plus ~0.3 s each side
+    assert trim_silence(np.zeros(rate, dtype=np.float32)).size == rate  # all quiet: left alone
+
+
+@pytest.mark.skipif(not (_kokoro_ready and _moonshine_ready), reason="local Kokoro/Moonshine not installed")
+def test_phone_turn_with_seconds_of_silence_before_the_answer_is_still_heard():
+    """Phone path: the STT buffer holds the silence while the customer listened to the
+    agent. Moonshine returned "" for a clip with ~5 s of lead-in (caught in a simulated
+    Vobiz call — the customer's first answer vanished)."""
+    from speech.stt.moonshine_local import MoonshineSTTProvider
+    from speech.tts.kokoro_local import KokoroTTSProvider
+    from voice.audio.processing import ResampleState, resample_pcm16
+
+    async def run():
+        tts = KokoroTTSProvider()
+        audio = b"".join([chunk async for chunk in tts.synthesize_stream("Yes, this is Naman from Test Business.")])
+        speech_16k = resample_pcm16(audio, 24000, 16000, ResampleState())
+        stt_stream = await MoonshineSTTProvider().start_stream()
+        await stt_stream.send_audio(b"\x00\x00" * 16000 * 5 + speech_16k + b"\x00\x00" * 8000)
+        result = await stt_stream.receive_final()
+        return (result.text if result else "").lower()
+
+    text = asyncio.run(run())
+    assert "naman" in text or "test business" in text, text

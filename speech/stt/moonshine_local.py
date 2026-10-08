@@ -73,10 +73,37 @@ async def preload_moonshine() -> None:
     await asyncio.get_running_loop().run_in_executor(_executor, _load)
 
 
+_TRIM_FRAME = SAMPLE_RATE_HZ // 50  # 20 ms
+_TRIM_PAD = int(0.3 * SAMPLE_RATE_HZ)
+
+
+def trim_silence(audio: np.ndarray) -> np.ndarray:
+    """Cut leading/trailing silence, keeping 0.3 s around the speech.
+
+    On a phone call the STT buffer holds everything since the last turn — including
+    the seconds the customer spent listening to the agent — and Moonshine returns
+    *nothing* for an utterance with ~3-5 s of silence in front of it (measured: the
+    same clip transcribed correctly with 0-1 s and 8 s of lead-in, empty at 3 s and
+    5 s). Push-to-talk in the browser demo never sends that silence, which is why it
+    only showed up on the phone path. Loudness is judged per 20 ms frame relative to
+    the loudest frames, so a line's background hiss isn't mistaken for speech."""
+    frames = len(audio) // _TRIM_FRAME
+    if frames < 2:
+        return audio
+    rms = np.sqrt(np.mean(audio[: frames * _TRIM_FRAME].reshape(frames, _TRIM_FRAME) ** 2, axis=1))
+    threshold = max(0.01, 0.1 * float(np.percentile(rms, 95)))
+    loud = np.flatnonzero(rms > threshold)
+    if loud.size == 0:
+        return audio
+    start = max(0, loud[0] * _TRIM_FRAME - _TRIM_PAD)
+    end = min(len(audio), (loud[-1] + 1) * _TRIM_FRAME + _TRIM_PAD)
+    return audio[start:end]
+
+
 def transcribe_pcm16(pcm16: bytes) -> str:
     """Blocking; run in `_executor`."""
     model, tokenizer = _load()
-    audio = np.frombuffer(pcm16, dtype="<i2").astype(np.float32) / 32768.0
+    audio = trim_silence(np.frombuffer(pcm16, dtype="<i2").astype(np.float32) / 32768.0)
     if len(audio) > MAX_AUDIO_SECONDS * SAMPLE_RATE_HZ:
         audio = audio[-int(MAX_AUDIO_SECONDS * SAMPLE_RATE_HZ):]
     tokens = model.generate(audio[None, :])
