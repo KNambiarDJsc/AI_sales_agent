@@ -9,6 +9,7 @@ against this.
 from __future__ import annotations
 
 import re
+import string
 from pathlib import Path
 
 import yaml
@@ -50,6 +51,9 @@ class StateConfig(BaseModel):
     allowed_tools: list[str] = Field(default_factory=list)
     fallback_response: str = ""
     transitions_on: dict[str, str] = Field(default_factory=dict)
+    # Optional fixed first line of the call, said without asking the LLM (see
+    # ScriptConfig.opening_line_for). Only meaningful on the script's starting state.
+    opening_line: str = ""
 
 
 class ScriptConfig(BaseModel):
@@ -89,6 +93,21 @@ class ScriptConfig(BaseModel):
         state = self.states.get(state_name)
         targets = set(state.transitions_on.values()) if state else set()
         return bool(targets) and targets <= {"END"}
+
+    def opening_line_for(self, state_name: str, fields: dict | None = None) -> str:
+        """The configured first line of the call with lead fields filled in, or "" if
+        none is configured or any `{field}` it uses is missing/empty for this lead —
+        then the LLM writes the opening as before, rather than the customer hearing
+        "{contact_name}" or "None"."""
+        state = self.states.get(state_name)
+        text = state.opening_line.strip() if state else ""
+        if not text:
+            return ""
+        fields = fields or {}
+        needed = {name for _, name, _, _ in string.Formatter().parse(text) if name}
+        if any(not str(fields.get(name) or "").strip() for name in needed):
+            return ""
+        return substitute_placeholders(text, fields)
 
     def fallback_for(self, state_name: str, fields: dict | None = None) -> str:
         state = self.states.get(state_name)

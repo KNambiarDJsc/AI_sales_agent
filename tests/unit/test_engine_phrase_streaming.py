@@ -128,6 +128,24 @@ async def test_disallowed_state_never_streams_early_and_falls_back_once():
     assert "must not play" not in " ".join(phrases)
 
 
+async def test_local_model_dnc_guess_is_never_spoken_early():
+    # Live finding (browser demo, local backend): the customer said "Yes, please have
+    # your sales team call me", the local model proposed DO_NOT_CALL, and the customer
+    # *heard* "I'll make sure to add your number to our do not call list" — streaming
+    # started before the engine refused the guess.
+    from orchestrator.state_machine import load_script_by_id
+
+    payload = _valid_payload(state="DO_NOT_CALL", speech="I'll make sure to add your number to our do not call list.")
+    llm = CountingStreamingLLM([payload[i : i + 3] for i in range(0, len(payload), 3)])
+    llm.backend = "local"
+    engine = ConversationEngine(llm, StateMachine(load_script_by_id("product-a"), "QUALIFICATION"), _context())
+    outcome, phrases, starts = await _collect_stream(engine, llm)
+    assert len(starts) == 1
+    assert "do not call" not in " ".join(phrases)
+    assert " ".join(phrases) == "Could you tell me a bit more about the product you'd want to sell?"
+    assert outcome.used_fallback and outcome.proposal.state == "QUALIFICATION"
+
+
 async def test_non_streaming_path_delivers_the_whole_reply_as_one_phrase(monkeypatch):
     get_settings().enable_speculative_tts = False
     engine = ConversationEngine(FakeNonStreamingLLM(_valid_payload(speech="Hello there. How are you?")),

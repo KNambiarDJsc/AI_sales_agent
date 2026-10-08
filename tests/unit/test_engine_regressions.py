@@ -245,10 +245,13 @@ async def test_local_model_dnc_guess_is_refused(monkeypatch):
 
     engine = ConversationEngine(llm, StateMachine(load_script_by_id("product-a"), "QUALIFICATION"), _context(),
                                 tool_registry=RecordingRegistry())
-    result, _ = await _run(engine, "Yes, please have your sales team calming.")
+    result, spoken = await _run(engine, "Yes, please have your sales team calming.")
     await asyncio.sleep(0.05)
     assert invoked == []
     assert result.new_state == "QUALIFICATION" and result.end_call is False
+    # The refused reply's own words are never said (rule 2: the state's fallback line).
+    assert spoken == ["Could you tell me a bit more about the product you'd want to sell?"]
+    assert result.used_fallback is True
 
 
 async def test_openai_model_dnc_judgement_is_still_honoured(monkeypatch):
@@ -269,6 +272,57 @@ async def test_openai_model_dnc_judgement_is_still_honoured(monkeypatch):
     await asyncio.sleep(0.05)
     assert invoked == ["mark_dnc"]
     assert result.new_state == "DO_NOT_CALL"
+
+
+class _NoLLM(FakeNonStreamingLLM):
+    async def propose(self, *a, **k):
+        raise AssertionError("the configured opening line must not wait for the LLM")
+
+
+async def test_configured_opening_line_is_spoken_without_the_llm(monkeypatch):
+    from orchestrator.state_machine import load_script_by_id
+
+    _patch_session_scope(monkeypatch, [])
+    context = _context()
+    context.lead_fields = {"contact_name": "Naman", "business_name": "Test Business"}
+    engine = ConversationEngine(_NoLLM(""), StateMachine(load_script_by_id("product-a"), "INTRO"), context,
+                                tool_registry=ToolRegistry())
+    result, spoken = await _run(engine, "")
+    await asyncio.sleep(0.05)
+    assert spoken == ["Hello, is this Naman at Test Business?"]
+    assert result.new_state == "INTRO" and result.end_call is False
+    assert context.history[-1].speaker == "agent"  # the LLM sees it as already said next turn
+
+
+@pytest.mark.parametrize("fields", [{"contact_name": "Naman"}, {"contact_name": "Naman", "business_name": None}, {}])
+async def test_opening_line_with_a_missing_lead_field_is_left_to_the_llm(monkeypatch, fields):
+    # Never say "{business_name}" or "None" to a customer.
+    from orchestrator.state_machine import load_script_by_id
+
+    _patch_session_scope(monkeypatch, [])
+    context = _context()
+    context.lead_fields = fields
+    engine = ConversationEngine(FakeNonStreamingLLM(_valid_payload(state="INTRO", speech="Hi, who am I speaking with?")),
+                                StateMachine(load_script_by_id("product-a"), "INTRO"), context,
+                                tool_registry=ToolRegistry())
+    _, spoken = await _run(engine, "")
+    await asyncio.sleep(0.05)
+    assert spoken == ["Hi, who am I speaking with?"]
+
+
+async def test_opening_line_is_only_for_the_first_turn(monkeypatch):
+    from orchestrator.state_machine import load_script_by_id
+
+    _patch_session_scope(monkeypatch, [])
+    context = _context()
+    context.lead_fields = {"contact_name": "Naman", "business_name": "Test Business"}
+    context.append_turn("agent", "Hello, is this Naman at Test Business?", "INTRO")
+    engine = ConversationEngine(FakeNonStreamingLLM(_valid_payload(state="INTRO", speech="Are you still there?")),
+                                StateMachine(load_script_by_id("product-a"), "INTRO"), context,
+                                tool_registry=ToolRegistry())
+    _, spoken = await _run(engine, "")
+    await asyncio.sleep(0.05)
+    assert spoken == ["Are you still there?"]
 
 
 async def test_invalid_llm_output_keeps_state_and_speaks_the_fallback(monkeypatch):

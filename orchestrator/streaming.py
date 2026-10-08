@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 
 from orchestrator.state_machine import StateMachine
 
@@ -186,8 +187,12 @@ class SpeculativeTurnExtractor:
     `.speech` holds the value safe to start synthesizing. Call `feed()` with each new
     delta in order — it maintains the running buffer internally."""
 
-    def __init__(self, state_machine: StateMachine):
+    def __init__(self, state_machine: StateMachine, may_speak: Callable[[str], bool] | None = None):
+        """`may_speak(state)`: the caller's own veto on speaking early for a state the
+        transition check allows but the caller will refuse later (the engine refuses a
+        local model's DO_NOT_CALL). Vetoed replies wait for full validation."""
         self._state_machine = state_machine
+        self._may_speak = may_speak
         self._buffer = ""
         self._state_checked = False
         self._state_ok = False
@@ -207,7 +212,9 @@ class SpeculativeTurnExtractor:
             state_value = extract_json_string_field(self._buffer, "state")
             if state_value is not None:
                 self._state_checked = True
-                self._state_ok = self._state_machine.is_transition_allowed(state_value)
+                self._state_ok = self._state_machine.is_transition_allowed(state_value) and (
+                    self._may_speak is None or self._may_speak(state_value)
+                )
                 if self._state_ok:
                     self.state = state_value
 

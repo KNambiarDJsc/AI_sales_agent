@@ -177,6 +177,15 @@ class ConversationEngine:
             )
 
         customer_spoke = customer_turn_index is not None
+        if not customer_spoke and not self._context.history:
+            opening = self._state_machine.script.opening_line_for(
+                self._state_machine.current_state, self._context.lead_fields
+            )
+            if opening:
+                return await self._speak_configured_opening(
+                    opening, delivery=_SpeechDelivery(on_speech_ready, on_speech_stream)
+                )
+
         messages = build_messages(self._state_machine.script, self._context)
         outcome = await self._propose_and_validate(
             messages, on_speech_ready, self._turn_schema(customer_spoke), on_speech_stream
@@ -193,16 +202,11 @@ class ConversationEngine:
             proposal = proposal.model_copy(
                 update={"state": self._state_machine.current_state, "tool_call": None, "end_call": False}
             )
-        proposes_dnc = proposal.state == "DO_NOT_CALL" or (
-            proposal.tool_call is not None and proposal.tool_call.name == "mark_dnc"
-        )
-        if proposes_dnc and getattr(self._llm, "backend", "openai") == "local":
-            # A real DNC request in the customer's words never gets here — the
-            # configured-phrase backstop handles it before the LLM runs. So a local
-            # model proposing DNC now is guessing, and small local models guessed
-            # wrong: they put a customer who had just said "please have your sales
-            # team call me" (and one who only confirmed their name) on do-not-call.
-            # Suppressing a lead is irreversible in practice; refuse the guess.
+        if self._is_local_dnc_guess(proposal):
+            # Normally refused before anything is spoken (`_refuse_local_dnc_guess`:
+            # the fallback line is said instead). This backstop only runs when the
+            # reply's speech was already streamed under an ordinary state and the
+            # mark_dnc tool call came after it — drop the tool, keep the call going.
             logger.warning("dnc_from_local_model_refused", extra={"proposed_state": proposal.state})
             update: dict = {"end_call": False}
             if proposal.state == "DO_NOT_CALL":
@@ -329,6 +333,57 @@ class ConversationEngine:
         )
         return TurnResult(speech=speech, end_call=True, new_state="DO_NOT_CALL", tool_result_summary=result.message)
 
+    async def _speak_configured_opening(self, speech: str, *, delivery: "_SpeechDelivery") -> TurnResult:
+        """The script's fixed first line (`opening_line` in config), said without an
+        LLM round trip: there's nothing to react to yet, and the LLM only paraphrased
+        the INTRO question — while the customer, who just picked up, heard silence
+        (3–12 s with the local model, ~1 s with OpenAI). No state change, no tools."""
+        await delivery.whole(speech)
+        state = self._state_machine.current_state
+        self._context.append_turn("agent", speech, state)
+        self._persist_turns_fire_and_forget(
+            customer_text=None,
+            customer_turn_index=None,
+            agent_turn_index=len(self._context.history) - 1,
+            previous_state=state,
+            proposal=AgentResponseProposal(
+                state=state, speech=speech, intent="configured_opening_line", extracted_facts={},
+                tool_call=None, end_call=False,
+            ),
+        )
+        return TurnResult(speech=speech, end_call=False, new_state=state)
+
+    def _is_local_dnc_guess(self, proposal: AgentResponseProposal) -> bool:
+        """A local model proposing do-not-call. A real DNC request in the customer's
+        words never reaches the LLM — the configured-phrase backstop handles it first —
+        so a local model proposing DNC is guessing, and small local models guessed
+        wrong: they put a customer who had just said "please have your sales team call
+        me" (and one who only confirmed their name) on do-not-call. Suppressing a lead
+        is irreversible in practice, so the guess is refused (OpenAI models' DNC
+        judgement is still honoured)."""
+        if getattr(self._llm, "backend", "openai") != "local":
+            return False
+        return proposal.state == "DO_NOT_CALL" or (
+            proposal.tool_call is not None and proposal.tool_call.name == "mark_dnc"
+        )
+
+    def _may_speak_early(self, state: str) -> bool:
+        """Whether a reply heading to `state` may start speaking before the whole
+        reply is validated. Not for a local model's DO_NOT_CALL: that proposal will be
+        refused, and its speech ("I'll add your number to our do-not-call list") was
+        heard by a customer who had asked for a sales call."""
+        return not (state == "DO_NOT_CALL" and getattr(self._llm, "backend", "openai") == "local")
+
+    def _refuse_local_dnc_guess(self, outcome: ValidationOutcome) -> ValidationOutcome:
+        """Rule 2: a refused proposal falls back to the current state and its
+        configured fallback line — its own speech is never said."""
+        if not self._is_local_dnc_guess(outcome.proposal):
+            return outcome
+        logger.warning("dnc_from_local_model_refused", extra={"proposed_state": outcome.proposal.state})
+        return build_fallback_outcome(
+            self._state_machine, "do-not-call guessed by the local model", self._context.lead_fields
+        )
+
     def _turn_schema(self, customer_spoke: bool = True) -> dict:
         """The structured-output schema for this turn. Before the customer has said
         anything, the only valid state is the current one and the only intent is
@@ -380,6 +435,7 @@ class ConversationEngine:
             return outcome
 
         outcome = validate_llm_response(proposal_raw.raw_text, self._state_machine, self._context.lead_fields)
+        outcome = self._refuse_local_dnc_guess(outcome)
         await delivery.whole(outcome.proposal.speech)
         return outcome
 
@@ -392,7 +448,7 @@ class ConversationEngine:
         exactly once — the caller must not deliver it again, which is exactly why
         `_propose_and_validate` treats a non-None return here as final rather than
         falling through."""
-        extractor = SpeculativeTurnExtractor(self._state_machine)
+        extractor = SpeculativeTurnExtractor(self._state_machine, may_speak=self._may_speak_early)
         splitter = PhraseSplitter()
         chunks: list[str] = []
 
@@ -458,6 +514,7 @@ class ConversationEngine:
                     extra={"spoken": delivery.spoken_text, "validated": outcome.proposal.speech},
                 )
         else:
+            outcome = self._refuse_local_dnc_guess(outcome)
             await delivery.whole(outcome.proposal.speech)
 
         return outcome

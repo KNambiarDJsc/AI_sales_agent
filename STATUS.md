@@ -4,6 +4,36 @@ Last updated: 2026-10-07 (real-time speech + local tuning pass). Read this befor
 it tracks what's real vs. placeholder, and what happens when client materials (code,
 prompts, scripts, credentials, models) arrive.
 
+## Local speed pass 2 + DNC speech fix (2026-10-08, branch `naman-experiment`)
+
+Browser demo, fully local, laptop still on battery (power-saving mode), browser
+memory freed: **you stop → agent audio median 6.9 s (max 7.2), was 9.3 s (max
+11.9)** the same morning before these changes; greeting after connect **3.2 s, was
+12.3 s**. 4 scripted calls: 3/4 pass, 0 fallbacks, first phrase median 2.27 s.
+- **Bug fixed — a refused DNC guess was spoken.** Live: "Yes, please have your sales
+  team call me" → the local model proposed DO_NOT_CALL, the engine refused it, but the
+  customer had already heard "I'll make sure to add your number to our do not call
+  list" (phrase streaming started first; the non-streaming path also spoke it). Now
+  the streaming gate never speaks early for a local DO_NOT_CALL, and a refused guess
+  is replaced by the current state's fallback line before anything is said (rule 2).
+- **Configured opening line** (`opening_line` on INTRO in the script YAML): said the
+  moment the call connects, no LLM wait — the LLM only paraphrased the INTRO question
+  while the customer heard silence. Only used if every `{field}` is known for the
+  lead; otherwise the LLM writes it as before. Wording is a PLACEHOLDER for the client.
+- **Moonshine capped at 4 threads** (`LOCAL_STT_THREADS`): 0.71 s vs 1.25 s median
+  per utterance (worst 1.00 vs 2.41 s), identical transcripts. In the browser STT went
+  from 0.9–5.0 s to 0.3–0.9 s.
+
+Measured and rejected: Kokoro int8 (2.3x *slower* on this CPU, no clarity gain);
+llama3.2:1b (1/4 calls, rambles into timeouts — not even faster); Moonshine tiny
+(0.46 s vs 0.71 s, same accuracy on clean synthetic clips — not chosen because real
+phone audio is where it loses, and that couldn't be measured here). Deleted the
+unused PyTorch Kokoro / moonshine-voice caches (571 MB).
+
+Where the remaining time goes (battery): LLM first phrase 2.3–4.5 s, Kokoro first
+audio 1.7–3.6 s. Plugged in, Windows switches this laptop to "Best performance";
+re-measure that way before judging. With a working OpenAI key the LLM is ~1 s.
+
 ## Real-time speech + local tuning (2026-10-07, branch `naman-experiment`)
 
 **Speech starts while the LLM is still writing.** The engine hands the voice layer

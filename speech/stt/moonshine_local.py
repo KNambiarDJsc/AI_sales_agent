@@ -34,14 +34,34 @@ _tokenizer = None
 _lock = threading.Lock()
 
 
+def _cap_threads(model, size: str, threads: int) -> None:
+    """The package opens its ONNX sessions with ONNX Runtime's defaults (every core)
+    and has no option for it, so they are reopened from the same cached files with a
+    thread cap (`settings.local_stt_threads`). Measured on the dev laptop (on battery):
+    base took 1.25 s median / 2.41 s worst per utterance on all 8 cores, 0.71 s / 1.00 s
+    on 4, same transcripts. Relies on the pinned package version's `encoder`/`decoder`
+    attributes (requirements-local.txt)."""
+    import onnxruntime as ort
+    from moonshine_onnx.model import _get_onnx_weights
+
+    options = ort.SessionOptions()
+    options.intra_op_num_threads = threads
+    encoder, decoder = _get_onnx_weights(size, "float")
+    model.encoder = ort.InferenceSession(encoder, options, providers=["CPUExecutionProvider"])
+    model.decoder = ort.InferenceSession(decoder, options, providers=["CPUExecutionProvider"])
+
+
 def _load():
     global _model, _tokenizer
     with _lock:
         if _model is None:
             from moonshine_onnx import MoonshineOnnxModel, load_tokenizer
 
-            name = f"moonshine/{get_settings().local_stt_model}"
+            s = get_settings()
+            name = f"moonshine/{s.local_stt_model}"
             model = MoonshineOnnxModel(model_name=name)
+            if s.local_stt_threads > 0:
+                _cap_threads(model, s.local_stt_model, s.local_stt_threads)
             tokenizer = load_tokenizer()
             model.generate(np.zeros((1, SAMPLE_RATE_HZ // 2), dtype=np.float32))  # warm-up
             _model, _tokenizer = model, tokenizer

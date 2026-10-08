@@ -100,6 +100,12 @@ class Settings(BaseSettings):
     # Local STT: Moonshine ONNX (useful-moonshine-onnx). Measured: base 0.23 s / 0.78 s /
     # 1.09 s for 1.5 / 6 / 8 s of speech; tiny ~2x faster but less accurate.
     local_stt_model: Literal["tiny", "base"] = "base"
+    # CPU threads for Moonshine (0 = all cores) — same reason as local_tts_threads:
+    # base measured 1.25 s median per utterance on all 8 cores vs 0.71 s on 4 (dev
+    # laptop, on battery), identical transcripts. tiny on 4 threads was 0.46 s with the
+    # same accuracy on clean test clips; not chosen because real phone audio is where
+    # tiny loses accuracy and that wasn't measurable here.
+    local_stt_threads: int = 4
     # Load local models at server start, so the first local reply isn't slowed by
     # model loading (Kokoro/Moonshine load, Ollama model into memory).
     local_preload: bool = True
