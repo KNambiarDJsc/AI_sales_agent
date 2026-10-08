@@ -117,7 +117,15 @@ class VoiceSession:
         """Kick off the call: the agent speaks first (Section 32's vertical slice —
         greet, identify the business, ask permission). Reuses the normal turn path
         with empty customer text so the same validation/state-machine rules apply to
-        the opening line as to every other turn."""
+        the opening line as to every other turn.
+
+        A scripted opening plays immediately with no model call. It is started as a
+        background speaking task, not awaited, so the caller's media loop keeps
+        consuming inbound audio and barge-in still works during the greeting."""
+        scripted = self._engine.scripted_opening()
+        if scripted is not None:
+            self._start_speaking(scripted)
+            return
         await self._run_agent_turn("")
 
     async def handle_inbound_audio(self, audio_chunk: bytes) -> None:

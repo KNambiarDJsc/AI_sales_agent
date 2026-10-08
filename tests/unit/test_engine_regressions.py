@@ -289,7 +289,7 @@ async def test_configured_opening_line_is_spoken_without_the_llm(monkeypatch):
                                 tool_registry=ToolRegistry())
     result, spoken = await _run(engine, "")
     await asyncio.sleep(0.05)
-    assert spoken == ["Hello, is this Naman at Test Business?"]
+    assert spoken == ["Hello, am I speaking with Naman at Test Business?"]
     assert result.new_state == "INTRO" and result.end_call is False
     assert context.history[-1].speaker == "agent"  # the LLM sees it as already said next turn
 
@@ -316,7 +316,7 @@ async def test_opening_line_is_only_for_the_first_turn(monkeypatch):
     _patch_session_scope(monkeypatch, [])
     context = _context()
     context.lead_fields = {"contact_name": "Naman", "business_name": "Test Business"}
-    context.append_turn("agent", "Hello, is this Naman at Test Business?", "INTRO")
+    context.append_turn("agent", "Hello, am I speaking with Naman at Test Business?", "INTRO")
     engine = ConversationEngine(FakeNonStreamingLLM(_valid_payload(state="INTRO", speech="Are you still there?")),
                                 StateMachine(load_script_by_id("product-a"), "INTRO"), context,
                                 tool_registry=ToolRegistry())

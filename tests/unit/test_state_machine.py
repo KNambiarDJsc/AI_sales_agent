@@ -75,3 +75,18 @@ def test_fallback_response_with_no_fields_still_works():
     script = load_script_by_id("product-a")
     sm = StateMachine(script, current_state="INTRO")
     assert sm.fallback_response() == sm.fallback_response(None)
+
+
+def test_opening_line_is_scripted_and_substitutes_lead_fields():
+    # The call's first words come from the script, not from a model call: a model round
+    # trip before the greeting cost 1-2s of dead air on a live call.
+    script = load_script_by_id("product-a")
+    sm = StateMachine(script, current_state="INTRO")
+    line = sm.opening_line({"contact_name": "Asha Rao", "business_name": "Rao Textiles"})
+    assert line == "Hello, am I speaking with Asha Rao at Rao Textiles?"
+
+
+def test_opening_line_is_none_for_states_without_one():
+    script = load_script_by_id("product-a")
+    sm = StateMachine(script, current_state="DISCOVERY")
+    assert sm.opening_line({"contact_name": "Asha Rao"}) is None

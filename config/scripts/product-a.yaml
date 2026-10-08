@@ -18,14 +18,14 @@ states:
     objective: >
       Greet the person, confirm you're speaking with the right contact, and identify
       the business calling on behalf of.
-    mandatory_questions:
-      - "Confirm you're speaking with {contact_name} at {business_name}."
     # Said the moment the call connects, without waiting for the LLM (it took 3-12 s
     # with the local model). Used only if every {field} is known for the lead —
     # otherwise the LLM writes the opening as before. Remove the line to always let
     # the LLM write it. PLACEHOLDER wording — client to confirm (incl. any identity
     # disclosure that must come first: system_prompt.yaml identity_disclosure).
-    opening_line: "Hello, is this {contact_name} at {business_name}?"
+    opening_line: "Hello, am I speaking with {contact_name} at {business_name}?"
+    mandatory_questions:
+      - "Confirm you're speaking with {contact_name} at {business_name}."
     allowed_tools: [end_call]
     fallback_response: >
       Sorry, could you tell me if this is {business_name}?

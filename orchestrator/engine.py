@@ -177,14 +177,13 @@ class ConversationEngine:
             )
 
         customer_spoke = customer_turn_index is not None
-        if not customer_spoke and not self._context.history:
-            opening = self._state_machine.script.opening_line_for(
-                self._state_machine.current_state, self._context.lead_fields
-            )
-            if opening:
-                return await self._speak_configured_opening(
-                    opening, delivery=_SpeechDelivery(on_speech_ready, on_speech_stream)
-                )
+        if not customer_spoke:
+            # The call's first words, from the script's `opening_line` — no LLM wait while
+            # a customer who just picked up hears silence (3–12 s with the local model).
+            opening = self.scripted_opening()
+            if opening is not None:
+                await _SpeechDelivery(on_speech_ready, on_speech_stream).whole(opening)
+                return TurnResult(speech=opening, end_call=False, new_state=self._state_machine.current_state)
 
         messages = build_messages(self._state_machine.script, self._context)
         outcome = await self._propose_and_validate(
@@ -332,26 +331,6 @@ class ConversationEngine:
             proposal=proposal,
         )
         return TurnResult(speech=speech, end_call=True, new_state="DO_NOT_CALL", tool_result_summary=result.message)
-
-    async def _speak_configured_opening(self, speech: str, *, delivery: "_SpeechDelivery") -> TurnResult:
-        """The script's fixed first line (`opening_line` in config), said without an
-        LLM round trip: there's nothing to react to yet, and the LLM only paraphrased
-        the INTRO question — while the customer, who just picked up, heard silence
-        (3–12 s with the local model, ~1 s with OpenAI). No state change, no tools."""
-        await delivery.whole(speech)
-        state = self._state_machine.current_state
-        self._context.append_turn("agent", speech, state)
-        self._persist_turns_fire_and_forget(
-            customer_text=None,
-            customer_turn_index=None,
-            agent_turn_index=len(self._context.history) - 1,
-            previous_state=state,
-            proposal=AgentResponseProposal(
-                state=state, speech=speech, intent="configured_opening_line", extracted_facts={},
-                tool_call=None, end_call=False,
-            ),
-        )
-        return TurnResult(speech=speech, end_call=False, new_state=state)
 
     def _is_local_dnc_guess(self, proposal: AgentResponseProposal) -> bool:
         """A local model proposing do-not-call. A real DNC request in the customer's
@@ -518,6 +497,30 @@ class ConversationEngine:
             await delivery.whole(outcome.proposal.speech)
 
         return outcome
+
+    def scripted_opening(self) -> str | None:
+        """The call's first words, straight from the script's `opening_line` — no LLM
+        round trip. Recorded as the agent's turn so the model sees what was said on
+        the next turn. Returns None when the current state has no scripted opening, a
+        lead field it needs is missing (never say "{contact_name}" or "None"), or the
+        call is already under way."""
+        if self._context.history:
+            return None
+        text = self._state_machine.opening_line(self._context.lead_fields)
+        if text is None:
+            return None
+        self._context.append_turn("agent", text, self._state_machine.current_state)
+        agent_turn_index = len(self._context.history) - 1
+        self._persist_turns_fire_and_forget(
+            customer_text=None,
+            customer_turn_index=None,
+            agent_turn_index=agent_turn_index,
+            previous_state=self._state_machine.current_state,
+            proposal=AgentResponseProposal(
+                state=self._state_machine.current_state, speech=text, intent="scripted_opening"
+            ),
+        )
+        return text
 
     @property
     def current_state(self) -> str:

@@ -20,6 +20,17 @@ from orchestrator.state_machine import ScriptConfig, substitute_placeholders
 from qualification.rules import load_rules
 from tools.registry import get_default_registry
 
+# Human-readable names for the language codes a script's `language` field actually
+# uses (config/scripts/*.yaml) — falls back to the raw code for anything not listed
+# here rather than failing, since this is just for prompt readability.
+_LANGUAGE_NAMES = {
+    "en": "English",
+    "en-IN": "English (India)",
+    "en-US": "English (US)",
+    "hi": "Hindi",
+    "hi-IN": "Hindi (India)",
+}
+
 
 @lru_cache
 def _load_system_prompt() -> dict:
@@ -50,9 +61,15 @@ def _configured(value: object) -> str:
 def _static_system_text(script: ScriptConfig, context: ConversationContext) -> str:
     """Everything identical on every turn of a call (and across calls of a campaign)."""
     system_prompt = _load_system_prompt()
+    # Language is call-level config (doesn't change turn to turn), so it belongs in
+    # this cached static part; the clock and state are in _turn_context_text.
+    language_name = _LANGUAGE_NAMES.get(script.language, script.language)
     parts = [
         system_prompt["role"],
         f"Identity disclosure requirement: {_configured(system_prompt.get('identity_disclosure'))}",
+        f"Speak only in {language_name} ({script.language}) for this entire call. Stay in this "
+        "language even if the customer switches to another language or mixes languages "
+        "(e.g. Hindi/English code-switching) — never mirror a language change mid-call.",
         "Behavior rules:",
         *[f"- {rule}" for rule in system_prompt.get("behavior_rules", [])],
         "",
