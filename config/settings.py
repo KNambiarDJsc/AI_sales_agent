@@ -168,6 +168,17 @@ class Settings(BaseSettings):
     vobiz_from_number: str = ""
     vobiz_http_timeout_seconds: float = 10.0
 
+    # Excel call log (workers/call_log.py): rebuilt from the database shortly after each
+    # call ends. Contains phone numbers — the default folder is git-ignored.
+    call_log_enabled: bool = True
+    call_log_path: str = str(REPO_ROOT / "exports" / "call_log.xlsx")
+    # Not real phone calls, so not logged: the browser demo, the test suite's fake
+    # provider, and campaigns whose name matches this pattern (the dev database also
+    # holds automated test runs, AI evaluations and simulated calls). Set to "" to log
+    # every call attempt.
+    call_log_skip_providers: str = "browser_demo,fake"
+    call_log_skip_campaigns: str = r"(?i)simulation|-test$|-sim$|^llm-eval$"
+
     @property
     def effective_public_base_url(self) -> str:
         return (self.public_base_url or self.twilio_webhook_base_url).rstrip("/")

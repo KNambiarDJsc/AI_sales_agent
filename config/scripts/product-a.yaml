@@ -167,6 +167,12 @@ dnc_phrases:
   - '\b(unsubscribe|opt me out|opt out of (these|your) calls)\b'
   - '\b(i|we) (do ?n[o''`’]?t|never) want (any )?(more )?(calls|to be called|you to call)\b(?! (right )?now| today| at the moment| this (week|month))'
 
+# States that mean "the lead agreed to talk to the sales team". A call that reached
+# any of them is marked "Yes" in the call log (exports/call_log.xlsx, see
+# workers/call_log.py) — decided from the state machine's record, not from anything
+# the LLM asserts.
+sales_followup_states: [INTERESTED]
+
 max_call_duration_seconds: 420   # PLACEHOLDER — confirm with client
 retry_limits:
   per_question: 2

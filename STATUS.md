@@ -4,6 +4,25 @@ Last updated: 2026-10-07 (real-time speech + local tuning pass). Read this befor
 it tracks what's real vs. placeholder, and what happens when client materials (code,
 prompts, scripts, credentials, models) arrive.
 
+## Excel call log + first real Vobiz call (2026-10-09)
+
+`exports/call_log.xlsx` (git-ignored — phone numbers) is rebuilt from the database a
+few seconds after every call (`workers/call_log.py`, scheduled by `finalize_call`;
+on demand: `python scripts/export_call_log.py`). Sheet "Calls": one row per call —
+time, lead, phone, **Agreed to sales team?**, outcome, call status, talk time, the
+path through the script, callback time, qualification summary/facts, full
+transcript. Sheet "Agreed to sales team": just the yeses. "Yes" is decided by the
+application — the call reached one of the script's `sales_followup_states` (config,
+INTERESTED in product-a) or a qualification requires a sales follow-up — not by the
+LLM's say-so. Test/simulation/demo campaigns are left out (`CALL_LOG_SKIP_*`).
+
+First real call (owner's own mobile, via the trial number): Vobiz accepted it
+("Call fired"), then the carrier rejected it after ~52 s — hangup cause 3020
+"Rejected", `NO_USER_RESPONSE`, source Carrier; ₹0 charged; our media stream never
+opened. Logged correctly as "Call failed". Cause not yet known (phone didn't ring?
+declined? DND/spam filter on the handset? trial-number restriction?) — next step is
+to ask the owner and, if needed, Vobiz support with the call UUID.
+
 ## Vobiz integration (2026-10-08, branch `naman-experiment`) — active provider; simulated calls pass, real call pending the owner's go-ahead
 
 Chosen after comparing providers for low cost / no business KYC for development:

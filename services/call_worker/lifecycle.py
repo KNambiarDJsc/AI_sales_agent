@@ -22,6 +22,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.models import CallAttempt, Callback, Conversation, Lead, Qualification, Suppression
+from workers.call_log import schedule_call_log_refresh
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +69,9 @@ async def finalize_call(
     if lead is not None and lead_status is not None and lead.status in ACTIVE_LEAD_STATUSES:
         lead.status = lead_status
     await session.flush()
+    # The Excel call log reads committed rows, so it rebuilds a few seconds from now,
+    # off this request — never in the way of the call or the webhook response.
+    schedule_call_log_refresh()
     logger.info(
         "call_finalized",
         extra={"call_attempt_id": str(attempt.id), "outcome": attempt.outcome, "lead_status": lead.status if lead else None},

@@ -19,3 +19,6 @@ node_modules/
 
 # Local model weights (scripts/setup_local_models.py downloads them)
 models/
+
+# Excel call log (workers/call_log.py) — contains leads' phone numbers
+exports/

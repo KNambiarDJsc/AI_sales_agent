@@ -66,6 +66,7 @@ class ScriptConfig(BaseModel):
     retry_limits: dict[str, int] = Field(default_factory=lambda: {"per_question": 2, "per_state": 3})
     qualification_ref: str | None = None
     dnc_phrases: list[str] = Field(default_factory=list)
+    sales_followup_states: list[str] = Field(default_factory=list)
 
     def is_dnc_request(self, customer_text: str) -> bool:
         """Deterministic DNC detection from the script's configured phrases — see
@@ -129,6 +130,7 @@ def load_script(path: str | Path) -> ScriptConfig:
         retry_limits=raw.get("retry_limits", {"per_question": 2, "per_state": 3}),
         qualification_ref=raw.get("qualification_ref"),
         dnc_phrases=raw.get("dnc_phrases") or [],
+        sales_followup_states=raw.get("sales_followup_states") or [],
     )
 
 
