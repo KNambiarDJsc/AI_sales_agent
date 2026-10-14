@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from database.models import CallAttempt, Campaign
 from database.repositories.call_repository import CallRepository
 from database.repositories.lead_repository import LeadRepository
+from services.call_worker.lifecycle import ACTIVE_CALL_STATUSES
 from telephony.base import OutboundCallRequest, TelephonyProvider
 
 logger = logging.getLogger(__name__)
@@ -36,7 +37,7 @@ async def _active_call_count(session: AsyncSession, campaign_id) -> int:
         .select_from(CallAttempt)
         .where(
             CallAttempt.campaign_id == campaign_id,
-            CallAttempt.status.in_(["queued", "dialing", "ringing", "in_progress"]),
+            CallAttempt.status.in_(ACTIVE_CALL_STATUSES),
         )
     )
     return int(result.scalar_one())
