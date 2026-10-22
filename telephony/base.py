@@ -73,6 +73,11 @@ class TelephonyProvider(ABC):
     # `voice/session/session.py`'s VoiceSession reads this to pick the right codec path
     # instead of hardcoding one provider's assumption for every provider.
     audio_encoding: str = "mulaw"  # "mulaw" | "pcm16"
+    # How far ahead of real time outbound audio may be sent. 0 = strictly real time.
+    # Only for providers that queue playback and can drop that queue on barge-in
+    # (clear_audio); the lead absorbs network/event-loop hiccups that otherwise reach
+    # the caller as gaps in the agent's voice.
+    outbound_lead_ms: int = 0
 
     @abstractmethod
     async def create_outbound_call(self, request: OutboundCallRequest) -> OutboundCallResult:

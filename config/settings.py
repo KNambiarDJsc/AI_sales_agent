@@ -268,6 +268,12 @@ class Settings(BaseSettings):
     # genuine human interruption is rarely over this fast, so real barge-ins still fire
     # normally once the grace window passes.
     barge_in_grace_ms: int = Field(default=500, ge=0, le=2000)
+    # How long the customer must talk over the agent before it stops talking. A
+    # 100 ms trigger cut the agent off mid-sentence on every "haan"/"yeah", cough and
+    # line echo — first live Vobiz call: 6 cut-offs in 2 minutes, heard as overlapping
+    # voices and sentences missing their middle. Shorter sounds while the agent talks
+    # are treated as backchannel and ignored (no reply to them either).
+    barge_in_min_speech_ms: int = Field(default=600, ge=100, le=2000)
 
     # --- Realtime latency / resilience tuning ---
     # Hard deadlines so one slow provider call can't hang a live phone call

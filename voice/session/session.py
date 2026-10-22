@@ -101,6 +101,10 @@ class VoiceSession:
 
         self._speaking_task: asyncio.Task | None = None
         self._background: set[asyncio.Task] = set()
+        # Speech heard while the agent talks (see _process_vad_frame): how much, and
+        # whether it has already interrupted the agent this utterance.
+        self._overlap_speech_ms = 0
+        self._barged_in_this_utterance = False
         self._first_frame_sent_at: float | None = None  # set in _speak(); see _process_vad_frame
         self._ended = False
 
@@ -179,35 +183,49 @@ class VoiceSession:
             del self._pending_pcm16[:VAD_FRAME_BYTES_PCM16_16K]
             await self._process_vad_frame(frame)
 
+    def _agent_speaking(self) -> bool:
+        return self._speaking_task is not None and not self._speaking_task.done()
+
     async def _process_vad_frame(self, pcm16_frame: bytes) -> None:
         # STT already received this audio (at its own rate) from handle_inbound_audio;
         # this frame is 16kHz purely for VAD/endpointing.
         is_speech = self._vad.is_speech(pcm16_frame, frame_ms=VAD_FRAME_MS)
         event = self._turn_taker.feed(is_speech, VAD_FRAME_MS)
 
-        if event == TurnEvent.SPEECH_STARTED and self._speaking_task is not None and not self._speaking_task.done():
-            # Anchored to when the first frame of THIS utterance actually reached the
-            # phone (self._first_frame_sent_at, set in _speak()) — not to when the
-            # speaking task was merely created. Caught live: TTS synthesis itself can
-            # take over a second before any audio exists, which is already longer than
-            # the grace window, so anchoring to task-creation time protected nothing in
-            # practice. If no frame has been sent yet, this can't be our own echo (there
-            # is nothing yet to echo), so let it through rather than suppress it.
-            if self._first_frame_sent_at is None:
-                await self._handle_barge_in()
-            else:
+        if event == TurnEvent.SPEECH_STARTED:
+            self._overlap_speech_ms = 0
+            self._barged_in_this_utterance = False
+        # Barge-in (Section 18) needs the customer to actually talk over the agent for
+        # settings.barge_in_min_speech_ms — not a "haan", a cough or line echo, which
+        # each used to cut the agent off mid-sentence. Still never inside the grace
+        # window right after our own audio starts (echo of it).
+        if self._turn_taker.speech_in_progress and self._agent_speaking() and not self._barged_in_this_utterance:
+            if is_speech:
+                self._overlap_speech_ms += VAD_FRAME_MS
+            if self._overlap_speech_ms >= self._settings.barge_in_min_speech_ms:
                 grace_s = self._settings.barge_in_grace_ms / 1000.0
-                elapsed = asyncio.get_event_loop().time() - self._first_frame_sent_at
-                if elapsed >= grace_s:
+                started = self._first_frame_sent_at
+                if started is None or asyncio.get_event_loop().time() - started >= grace_s:
+                    self._barged_in_this_utterance = True
                     await self._handle_barge_in()
-                else:
-                    logger.info(
-                        "barge_in_suppressed_grace_window",
-                        extra={"call_id": self._identity.provider_call_id, "elapsed_ms": int(elapsed * 1000)},
-                    )
 
         if event in (TurnEvent.TURN_ENDED, TurnEvent.MAX_TURN_REACHED):
-            await self._on_turn_ended()
+            if self._agent_speaking() and not self._barged_in_this_utterance:
+                # Short speech while the agent kept talking: backchannel ("haan",
+                # "okay") or noise. Take its transcript out of the STT stream so it
+                # isn't glued onto the next real turn, and don't reply to it — a reply
+                # queued behind the current one is what sounded like several agents.
+                await self._discard_turn()
+            else:
+                await self._on_turn_ended()
+
+    async def _discard_turn(self) -> None:
+        try:
+            result = await asyncio.wait_for(self._stt_stream.receive_final(), timeout=self._settings.stt_timeout_seconds)
+        except Exception:  # noqa: BLE001
+            result = None
+        logger.info("backchannel_ignored", extra={"call_id": self._identity.provider_call_id,
+                                                  "text": (result.text if result else "")[:60]})
 
     async def _handle_barge_in(self) -> None:
         """Section 18: stop TTS, clear the provider's buffered audio, cancel the
@@ -374,6 +392,7 @@ class VoiceSession:
         next_send_time = loop.time()
         speak_start = next_send_time
         first_frame_logged = False
+        lead_s = getattr(self._telephony, "outbound_lead_ms", 0) / 1000.0
 
         async def _send_paced(frame: bytes) -> None:
             # Real-time pacing (Section 16/18): see the history of this function — OpenAI's
@@ -382,10 +401,9 @@ class VoiceSession:
             # duration; if processing falls behind, reset to "now" rather than burst.
             nonlocal next_send_time, first_frame_logged
             now = loop.time()
-            send_time = now
-            if next_send_time > now:
-                await asyncio.sleep(next_send_time - now)
-                send_time = next_send_time
+            send_time = max(now, next_send_time)
+            if next_send_time - lead_s > now:  # stay at most `lead_s` ahead of playback
+                await asyncio.sleep(next_send_time - lead_s - now)
             await self._telephony.send_audio(self._identity.provider_call_id, frame)
             if not first_frame_logged:
                 first_frame_logged = True

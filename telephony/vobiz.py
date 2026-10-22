@@ -183,6 +183,10 @@ class _Stream:
 class VobizProvider(TelephonyProvider):
     name = "vobiz"
     audio_encoding = "pcm16"  # audio/x-l16, 8 kHz mono — see module docstring
+    # Vobiz queues playAudio and clearAudio drops the queue (docs: xml/stream/
+    # clear-audio), so audio may run slightly ahead — strict real-time pacing let every
+    # hiccup become a gap the caller heard.
+    outbound_lead_ms = 400
 
     def __init__(self, transport: httpx.AsyncBaseTransport | None = None) -> None:
         settings = get_settings()

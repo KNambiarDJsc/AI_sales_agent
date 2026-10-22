@@ -210,13 +210,13 @@ dnc_phrases:
   - '(मेरा|हमारा)\s*(नंबर|नम्बर)\s*(हटा|हटाओ|डिलीट)'
   - '(लिस्ट|सूची)\s*से\s*(हटा|हटाओ|निकाल)'
 
-# Said the instant the customer stops talking — recorded once in advance, so it plays
+# Said as soon as the customer's words are recognized (~0.7 s after they stop) — recorded once in advance, so it plays
 # with no delay — while the real reply is prepared (2-3 s of network round trips).
 # Rotated, in the customer's language (language_policy). Remove to turn off.
 # PLACEHOLDER wording — client to confirm.
 acknowledgments:
-  en: ["Okay.", "Right.", "I see.", "Got it."]
-  hi: ["जी।", "अच्छा।", "ठीक है।", "जी, समझ गया।"]
+  en: ["Hmm.", "I see.", "Right."]
+  hi: ["जी।", "अच्छा।", "हम्म।"]
 
 # States that mean "the lead agreed to talk to the sales team". A call that reached
 # any of them is marked "Interested" in the call log (exports/call_log.xlsx, see

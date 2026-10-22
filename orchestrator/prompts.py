@@ -102,7 +102,7 @@ def _static_system_text(script: ScriptConfig, context: ConversationContext) -> s
         _language_instruction(script),
         *(
             ["Before each of your replies the customer has already heard a short acknowledgment (such as "
-             "'Okay.'), so start your reply with substance, not with another acknowledgment word."]
+             "'Hmm.'), so start your reply with substance, not with another acknowledgment word."]
             if script.acknowledgments else []
         ),
         "Behavior rules:",
