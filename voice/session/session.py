@@ -246,7 +246,6 @@ class VoiceSession:
         self._speaking_task = asyncio.create_task(self._play(_once(pcm)))
 
     async def _on_turn_ended(self) -> None:
-        self._acknowledge()
         # Timing instrumentation (not guessing where per-turn latency goes): logs how
         # long the STT-final wait itself took, separate from the LLM/TTS time logged
         # in _run_agent_turn/_speak — added live while chasing a reported 4-5s gap.
@@ -270,6 +269,12 @@ class VoiceSession:
             return
 
         self._consecutive_empty_turns = 0
+        # Only now, with real words recognized: acknowledging at the end of every VAD
+        # turn (first live call, 2026-10-22) also said "Okay." after line noise and
+        # mid-sentence pauses — 8 stray acknowledgments in a 2-minute call, each one
+        # then mistaken for the customer interrupting. ~0.7 s later than instant, still
+        # ~2 s before the reply.
+        self._acknowledge()
         await self._run_agent_turn(customer_text)
 
     async def _handle_empty_turn(self) -> None:
