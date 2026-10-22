@@ -4,6 +4,9 @@ AI outbound voice sales qualification system. Built for a 4–5 day MVP, structu
 client-specific scripts, qualification rules, prompts, telephony provider and any
 existing client code/models can be swapped in later without touching the core engine.
 
+**New here? Read [`FLOW.md`](FLOW.md)** — how a lead goes from the Excel sheet to a
+phone conversation to a result, with diagrams.
+
 ## Status (see `STATUS.md`)
 
 This is the **initial scaffold**: the architectural skeleton, interfaces, database schema,
