@@ -55,6 +55,13 @@ class OpenAILLMProvider(LLMProvider):
             latency_ms=latency_ms,
         )
 
+    async def warm_up(self, messages: list[LLMMessage], json_schema: dict, schema_name: str = "agent_response") -> None:
+        # Same model/prompt/schema as a real turn, so the prompt-cache prefix matches; one
+        # output token keeps the cost to the (cached-rate) input.
+        await get_openai_client().chat.completions.create(
+            **self._request_kwargs(messages, schema_name, json_schema), max_completion_tokens=1
+        )
+
     async def propose_stream(
         self,
         messages: list[LLMMessage],

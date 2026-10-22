@@ -83,6 +83,11 @@ class Settings(BaseSettings):
     # "" = standard processing; "priority" = OpenAI Fast mode (faster, ~1.75x token
     # price — gpt-4.1-mini $0.70/$2.80 per 1M; still < $0.02 per call).
     openai_llm_service_tier: str = ""
+    # When a call connects, send one 1-token request with the call's prompt so the
+    # connection is open and OpenAI's prompt cache is filled while the greeting plays:
+    # the first real reply took 3.3 s cold vs ~1 s warm. Costs ~4k input tokens
+    # (~$0.002 on gpt-4.1-mini, less when already cached) per call.
+    llm_warm_up: bool = True
     # STT language. Empty = auto-detect, needed for English/Hindi/Hinglish calls (both
     # transcribe models still wrote Hindi correctly when pinned to "en", but pinning is
     # wrong for a Hindi caller). Set e.g. "en" only for fixed-language campaigns.
@@ -208,6 +213,24 @@ class Settings(BaseSettings):
     vobiz_api_base_url: str = "https://api.vobiz.ai/api/v1"
     vobiz_from_number: str = ""
     vobiz_http_timeout_seconds: float = 10.0
+
+    # --- Client console (apps/api/routers/console.py + the web/ Next.js app) ---
+    # The console's single shared login (one account for the client). Empty password =
+    # console disabled (its API answers 503).
+    console_username: str = "admin"
+    console_password: str = ""
+    # Conversation flow the console's calls (and the browser demo) use: a script in
+    # config/scripts/ and the campaign prompt with its verified knowledge.
+    console_script_id: str = "seller-flow"
+    console_campaign_prompt: str = "config/prompts/seller-flow.yaml"
+    # Browser origins allowed to call the console API (the Next.js app): comma-separated.
+    console_allowed_origins: str = "http://localhost:3100,http://127.0.0.1:3100"
+    console_token_hours: int = 12
+    # Workspace (tenant) the console's campaigns live in. Tests use their own.
+    console_tenant_name: str = "Console"
+    # The console's auto-dialer runs inside the API server, one lead at a time. Off in
+    # tests (tests/conftest.py).
+    console_dialer_enabled: bool = True
 
     # Excel call log (workers/call_log.py): rebuilt from the database shortly after each
     # call ends. Contains phone numbers — the default folder is git-ignored.

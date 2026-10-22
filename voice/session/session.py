@@ -110,6 +110,8 @@ class VoiceSession:
 
     async def start(self) -> None:
         self._stt_stream = await self._stt_provider.start_stream()
+        self._background.add(warm := asyncio.create_task(self._engine.warm_up()))
+        warm.add_done_callback(self._background.discard)
         self._prerecord_acknowledgments(delay_s=1.5)  # after the greeting has started
 
     def _prerecord_acknowledgments(self, delay_s: float = 0.0) -> None:

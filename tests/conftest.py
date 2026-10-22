@@ -9,4 +9,5 @@ from config.settings import get_settings
 @pytest.fixture(autouse=True)
 def _no_call_log_writes(monkeypatch):
     monkeypatch.setattr(get_settings(), "call_log_enabled", False)
+    monkeypatch.setattr(get_settings(), "console_dialer_enabled", False)  # never dial from a test
     monkeypatch.setattr("services.call_worker.lifecycle.schedule_call_log_refresh", lambda *a, **k: None)

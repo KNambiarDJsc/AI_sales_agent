@@ -1,0 +1,45 @@
+# Qualification rules for script_id=seller-flow, read by qualification/rules.py.
+# From the client's flow: an interested seller is one who wants to sell online and
+# agrees to the specialist's callback. Thresholds are PLACEHOLDER — confirm with client.
+
+script_id: seller-flow
+version: 1
+
+outcomes:
+  - qualified
+  - callback_requested
+  - needs_information
+  - objection_unresolved
+  - not_interested
+  - wrong_number
+  - do_not_call
+  - uncertain
+
+dnc_overrides_all: true
+
+interested_conditions:
+  - explicit_interest
+  - agreed_to_specialist_callback
+
+disqualification_conditions:
+  - not_interested
+  - do_not_call
+  - wrong_number
+
+qualified_when:
+  all_of:
+    - fact: interested_in_selling_online
+      equals: true
+    - fact: willing_to_be_contacted
+      equals: true
+  min_confidence: 0.6
+
+low_confidence_routes_to: uncertain
+
+evidence_required: true
+
+dimensions:
+  - need
+  - timing
+  - willingness
+  - evidence

@@ -6,6 +6,7 @@ together what config/prompts and config/scripts already say.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
@@ -13,7 +14,7 @@ from zoneinfo import ZoneInfo
 
 import yaml
 
-from config.settings import PROMPTS_DIR
+from config.settings import PROMPTS_DIR, REPO_ROOT
 from llm.base import LLMMessage
 from orchestrator.context import ConversationContext
 from orchestrator.state_machine import ScriptConfig, substitute_placeholders
@@ -39,7 +40,10 @@ def _load_system_prompt() -> dict:
 
 
 def load_campaign_prompt(path: str | Path) -> dict:
-    with Path(path).open("r", encoding="utf-8") as f:
+    path = Path(path)
+    if not path.is_absolute():
+        path = REPO_ROOT / path  # campaign config stores repo-relative paths
+    with path.open("r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 
@@ -91,6 +95,45 @@ def _language_instruction(script: ScriptConfig) -> str:
     return text + " Never speak any other language."
 
 
+_DEVANAGARI = re.compile(r"[ऀ-ॿ]")
+
+
+def _reply_language_hint(script: ScriptConfig, customer_text: str) -> str:
+    """Which language this reply should be in, read off the customer's latest line —
+    with match_customer and Hindi + English. Without it the model drifted: a Hindi
+    reply to a plain English line, English replies to romanized Hinglish."""
+    codes = {code.split("-")[0] for code in (script.supported_languages or [script.language])}
+    if script.language_policy != "match_customer" or not {"hi", "en"} <= codes:
+        return ""
+    if _DEVANAGARI.search(customer_text):
+        return "Reply language: the customer's latest message is in Hindi/Hinglish, so reply in Hindi/Hinglish."
+    return (
+        "Reply language: the customer's latest message is in Latin letters. If its words are English, reply in "
+        "English. If it is Hindi written in English letters (e.g. 'haan bolo', 'kya karna padega'), reply in "
+        "Hinglish."
+    )
+
+
+def _knowledge_lines(campaign_prompt: dict) -> list[str]:
+    """The campaign's verified answers per topic (`knowledge`) and how to handle each
+    concern (`objection_playbook`) — config/prompts/<campaign>.yaml. Topics the client
+    hasn't answered yet show as not provided, so the agent offers the specialist instead
+    of making something up."""
+    lines: list[str] = []
+    knowledge = campaign_prompt.get("knowledge") or {}
+    if knowledge:
+        lines.append(
+            "Verified knowledge — the only facts you may state. For a topic marked not provided, don't answer "
+            "it: acknowledge the concern and offer that our specialist will cover it on a call:"
+        )
+        lines += [f"- {topic}: {_configured(answer)}" for topic, answer in knowledge.items()]
+    playbook = campaign_prompt.get("objection_playbook") or {}
+    if playbook:
+        lines.append("How to handle each kind of concern:")
+        lines += [f"- {topic}: {how}" for topic, how in playbook.items()]
+    return lines
+
+
 def _static_system_text(script: ScriptConfig, context: ConversationContext) -> str:
     """Everything identical on every turn of a call (and across calls of a campaign)."""
     system_prompt = _load_system_prompt()
@@ -110,6 +153,7 @@ def _static_system_text(script: ScriptConfig, context: ConversationContext) -> s
         "",
         f"Campaign product info: {_configured(context.campaign_prompt.get('product_info'))}",
         f"Target customer: {_configured(context.campaign_prompt.get('target_customer'))}",
+        *_knowledge_lines(context.campaign_prompt),
         "",
         system_prompt["output_contract"],
     ]
@@ -143,6 +187,9 @@ def _turn_context_text(script: ScriptConfig, context: ConversationContext) -> st
     customer_just_spoke = bool(context.history) and context.history[-1].speaker == "customer"
     if customer_just_spoke:
         parts.append(_transitions_text(script, context.current_state))
+        language_hint = _reply_language_hint(script, context.history[-1].text)
+        if language_hint:
+            parts.append(language_hint)
     else:
         parts.append(
             "The customer hasn't said anything yet this turn: speak first, working on this state's objective. "

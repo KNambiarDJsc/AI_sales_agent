@@ -1,8 +1,43 @@
 # Status
 
-Last updated: 2026-10-07 (real-time speech + local tuning pass). Read this before adding anything —
+Last updated: 2026-10-22 (client console + client conversation flow). Read this before adding anything —
 it tracks what's real vs. placeholder, and what happens when client materials (code,
 prompts, scripts, credentials, models) arrive.
+
+## Client console (web/) + the client's conversation flow (2026-10-22)
+
+**Console** — a Next.js 16 app in `web/` (port 3100) on top of `apps/api/routers/console.py`:
+login (one shared account: `CONSOLE_USERNAME` / `CONSOLE_PASSWORD` in `.env`), dashboard with a
+live call card (transcript as it happens), Leads (Excel/CSV upload, template, add one, call now,
+remove never-called), Test call (rings any number now, any hour), Call history + transcripts,
+Settings (calling hours, system status), Excel export, and a link to the browser voice demo.
+"Start calling leads" turns on the in-process dialer: one lead at a time, inside calling hours,
+DNC checked at dial time. Run: backend `uvicorn apps.api.main:app --port 8000`, then
+`cd web && npm run dev` → http://localhost:3100. Deploying the UI to Vercel needs
+`NEXT_PUBLIC_API_URL` = the backend's public https URL and that URL's origin added to
+`CONSOLE_ALLOWED_ORIGINS`; the backend itself must stay reachable by Vobiz (India).
+The single shared login is what the owner asked for; anyone with it can place calls on the
+Vobiz/OpenAI accounts — use a stronger password before sharing the URL publicly.
+
+**Conversation flow** — `config/scripts/seller-flow.yaml` implements the client's brief
+(Greeting → Business confirmation → Personalized pitch → Intent detection, then the interested /
+not interested (reason → objection → respond → reassess) / information / callback-visit-info /
+unclear → human follow-up / DNC branches). Console calls and the browser demo use it
+(`CONSOLE_SCRIPT_ID`); `product-a` is unchanged for the tests and older campaigns.
+Facts the agent may state come only from `config/prompts/seller-flow.yaml` → `knowledge`
+(pricing, returns, payments, operations, trust, getting_started). **All of those answers are
+PLACEHOLDER until the client fills them in** — until then the agent acknowledges the concern
+and offers the specialist callback instead of answering. Line wording and Hindi translations
+are ours: PLACEHOLDER, client to confirm. Lead sheets may carry a "Product category" column
+(stored as `product_category`) to personalize the pitch.
+
+Text eval against gpt-4.1-mini (12 scenarios, scratch harness, no calls): correct branch in each;
+no invented prices; acknowledgments ("hmm okay") no longer count as a yes; concerns tracked
+with firsthand vs heard-from-others; callback/info requests always go through
+`schedule_callback`. First-phrase latency median 0.99 s, max 1.37 s, after adding an LLM warm-up
+at call connect (`LLM_WARM_UP`, one 1-token request while the greeting plays: the cold first
+reply was 3.3 s). Known gap: romanized Hinglish *typed* text is answered in English; on calls
+STT writes Hindi in Devanagari, which is answered in Hindi.
 
 ## OpenAI on a $5 budget, Hindi/English/Hinglish, instant acknowledgments (2026-10-22)
 

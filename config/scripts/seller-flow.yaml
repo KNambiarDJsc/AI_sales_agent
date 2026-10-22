@@ -1,0 +1,224 @@
+# "seller-flow" — the client's conversation flow (received 2026-10-22):
+#
+#   Greeting → Business Confirmation → Personalized Pitch → Intent Detection
+#   Interested:            arrange callback → capture timing → close
+#   Not interested:        ask reason → identify objection → respond → clarify if needed → reassess intent
+#   Information request:   answer within verified knowledge → clarify the next step
+#   Callback / visit / info request: capture request → route for follow-up
+#   Unclear:               clarify → if unresolved, arrange human follow-up
+#   Refusal / do-not-call: respect the decision → close
+#
+# The flow (states, branches, guardrails) is the client's. The *wording* of every line
+# below and the Hindi translations are ours — PLACEHOLDER until the client confirms.
+# What the agent may say about pricing/returns/payments/operations/trust comes only
+# from config/prompts/seller-flow.yaml (`knowledge`) — never from this file or the LLM.
+#
+# Lead context used: contact_name, business_name, and any extra column from the lead
+# sheet — "Product category" (stored as product_category) personalizes the pitch.
+
+script_id: seller-flow
+version: 1
+language: en-IN
+# Start in English; reply in the language the customer speaks (English / Hindi /
+# Hinglish) — requested by the project owner 2026-10-22.
+language_policy: match_customer
+supported_languages: [en-IN, hi-IN]
+
+campaign:
+  objective: "Onboard sellers onto Amazon / online selling — qualify and hand interested sellers to the sales team"
+
+states:
+  INTRO:
+    objective: >
+      Greeting and business confirmation. The greeting below has already been said: you asked
+      whether you are speaking with the contact at their business. Once they confirm, give the
+      personalized pitch in the same reply: in one or two short sentences say you help businesses
+      like theirs sell on Amazon and online (mention their product category if the lead info has
+      one), then ask if they would be interested. If it's the wrong person or business, apologize
+      and close. If they are busy right now, ask when to call back.
+    opening_line: "Hello, am I speaking with {contact_name} from {business_name}?"
+    mandatory_questions:
+      - "Confirm you're speaking with {contact_name} from {business_name}."
+    allowed_tools: [update_lead, end_call]
+    fallback_response:
+      en: "Sorry, is this {business_name}?"
+      hi: "माफ़ कीजिए, क्या यह {business_name} है?"
+    transitions_on:
+      confirmed_business: PITCH
+      wrong_person_or_business: WRONG_NUMBER
+      busy_right_now: CALLBACK
+
+  PITCH:
+    objective: >
+      Intent detection. The customer has heard the pitch. Work out what they want from their
+      reply. A bare "hmm", "okay", "hmm okay", "achha" or "right" is an acknowledgment, not a
+      clear yes (intent unclear is wrong too — stay here): ask once more, directly, e.g. "Just to
+      confirm, shall I have our specialist call you to set this up?". A clear yes ("yes, I'm
+      interested", "sure, go ahead", "haan, interested hoon") is interested: in the same reply say
+      a specialist will call to set them up and ask what day and time suits them — don't ask
+      again whether they want the call. If they ask a question, answer it from the verified
+      knowledge only (or say the specialist will cover it) and then ask whether they'd like to
+      explore it.
+    mandatory_questions:
+      - "Would you be interested in selling your products on Amazon / online with our help?"
+    allowed_tools: [update_lead, end_call]
+    fallback_response:
+      en: "Would you be open to selling your products online with our help?"
+      hi: "क्या आप हमारी मदद से अपने products online बेचना चाहेंगे?"
+    transitions_on:
+      interested: INTERESTED
+      not_interested_or_objection: OBJECTION_HANDLING
+      wants_callback_visit_or_information: CALLBACK
+      unclear: CLARIFY
+
+  OBJECTION_HANDLING:
+    objective: >
+      Not interested or has a concern. If they declined without a reason, ask once, briefly and
+      politely, what's holding them back. Identify the concern (pricing, returns, payments,
+      operations, trust, timing, or other) and answer that specific concern using only the
+      verified knowledge and the objection playbook — never re-pitch. Several concerns: handle one
+      at a time, starting with the one they stressed most, and come back to the others. Something
+      they experienced themselves deserves empathy and a question about what happened; something
+      they only heard from others can be gently corrected with verified facts. After answering, ask
+      a short question to reassess (e.g. whether that helps, or whether they'd like the specialist
+      to walk them through it). If they still decline after their concern was answered, respect it.
+      If they now agree, say a specialist will call and ask what day and time suits them.
+    allowed_tools: [update_lead, end_call]
+    fallback_response:
+      en: "That's a fair concern. Would it help if our specialist called to explain it properly?"
+      hi: "यह सही सवाल है। क्या हमारे specialist आपको कॉल करके अच्छे से समझा दें?"
+    transitions_on:
+      now_interested: INTERESTED
+      raised_another_concern: OBJECTION_HANDLING
+      wants_callback_visit_or_information: CALLBACK
+      still_not_interested: NOT_INTERESTED
+      unclear: CLARIFY
+
+  INTERESTED:
+    objective: >
+      Interested: arrange the callback. Say a specialist from the team will call to get them set
+      up, and ask what day and time suits them. When they give a time, call schedule_callback with
+      it, repeat the time back in a few words and close the call warmly. If they have no
+      preference, schedule it without a time (notes: "any time") and close.
+    mandatory_questions:
+      - "When would be a good time for our specialist to call you?"
+    allowed_tools: [schedule_callback, create_qualification, update_lead, end_call]
+    fallback_response:
+      en: "Great. When would be a good time for our specialist to call you?"
+      hi: "बहुत बढ़िया। हमारे specialist आपको किस समय कॉल करें?"
+    transitions_on:
+      timing_captured: END
+      no_time_preference: END
+
+  CALLBACK:
+    objective: >
+      Capture the follow-up request and route it. Find out what they want — a call back later, a
+      visit, or information sent to them — and when (and for information, how: WhatsApp, email).
+      The request only reaches the team through schedule_callback: on the turn they give the
+      details, call schedule_callback (not end_call) with the time they gave (requested_time
+      null if they gave none — never make one up) and the request type
+      and details in notes (e.g. "Send details on WhatsApp"), confirm it in a few words and set
+      end_call true in the same reply. Never say something will be sent or arranged without
+      calling schedule_callback.
+    mandatory_questions:
+      - "What day and time works best for you?"
+    allowed_tools: [schedule_callback, update_lead, end_call]
+    fallback_response:
+      en: "Sure. When would be a better time to reach you?"
+      hi: "ज़रूर। आपसे बात करने का सही समय कब रहेगा?"
+    transitions_on:
+      request_captured: END
+
+  CLARIFY:
+    objective: >
+      Unclear. You couldn't tell what the customer means. Ask one short clarifying question (or
+      ask them to repeat if you didn't catch it). If it's still unclear after that, move to
+      UNCERTAIN so a person from the team follows up. If they now clearly agree, say a specialist
+      will call and ask what day and time suits them.
+    allowed_tools: [update_lead, end_call]
+    fallback_response:
+      en: "Sorry, I didn't quite get that. Could you say that again?"
+      hi: "माफ़ कीजिए, मैं ठीक से समझ नहीं पाया। क्या आप दोबारा बता सकते हैं?"
+    transitions_on:
+      interested: INTERESTED
+      not_interested_or_objection: OBJECTION_HANDLING
+      wants_callback_visit_or_information: CALLBACK
+      still_unclear: UNCERTAIN
+
+  UNCERTAIN:
+    objective: >
+      Human follow-up. The issue couldn't be resolved confidently. Say someone from the team will
+      call to help, call schedule_callback (with a time if they give one; notes say what was
+      unresolved) and close politely.
+    allowed_tools: [schedule_callback, update_lead, create_qualification, end_call]
+    fallback_response:
+      en: "No problem, someone from our team will call you to help with this."
+      hi: "कोई बात नहीं, हमारी टीम से कोई आपको कॉल करके इसमें मदद करेगा।"
+    transitions_on:
+      done: END
+
+  NOT_INTERESTED:
+    objective: "Respect the decision. Thank them briefly and close the call. Do not pitch again."
+    allowed_tools: [update_lead, end_call]
+    fallback_response:
+      en: "Understood, thank you for your time."
+      hi: "समझ गया, आपके समय के लिए धन्यवाद।"
+    transitions_on:
+      done: END
+
+  DO_NOT_CALL:
+    objective: "Confirm we won't call again, apologize, and end the call immediately."
+    allowed_tools: [mark_dnc, end_call]
+    fallback_response:
+      en: "Understood, we won't call again. Sorry for the disturbance."
+      hi: "समझ गया, हम आपको दोबारा कॉल नहीं करेंगे। परेशानी के लिए माफ़ी।"
+    transitions_on:
+      done: END
+
+  WRONG_NUMBER:
+    objective: "Apologize for the wrong number/person and end the call."
+    allowed_tools: [update_lead, end_call]
+    fallback_response:
+      en: "Sorry for the confusion, have a good day."
+      hi: "गलतफ़हमी के लिए माफ़ी, आपका दिन शुभ हो।"
+    transitions_on:
+      done: END
+
+  END:
+    objective: "Terminal state."
+    allowed_tools: []
+
+# Deterministic do-not-call backstop (CLAUDE.md rule 3) — same phrases as product-a.yaml:
+# a match records DNC, says DO_NOT_CALL's line and ends the call without the LLM.
+dnc_phrases:
+  - '\b(stop|quit) (calling|ringing|phoning|contacting|bothering|messaging|texting|harass\w*)\b'
+  - '\bdo ?n[o''`’]?t (ever )?(call|ring|phone|message|text) (me|us|this number|here)( ever)? (again|anymore|any more)\b'
+  - '\bdo ?n[o''`’]?t (ever )?(contact|bother|harass) (me|us)\b'
+  - '\bnever (call|ring|phone|contact) (me|us|this number|here|again)\b'
+  - '\b(remove|delete|take|strike) (me|us|my number|our number|this number|my name)( off| from| out of)? (your|the|this|all) (list|lists|database|records|calling list)\b'
+  - '\b(do[- ]?not[- ]?call|don''t call|dnc|dnd) (list|registry|register)\b'
+  - '\b(unsubscribe|opt me out|opt out of (these|your) calls)\b'
+  - '\b(i|we) (do ?n[o''`’]?t|never) want (any )?(more )?(calls|to be called|you to call)\b(?! (right )?now| today| at the moment| this (week|month))'
+  - '\b(dobara|dubara|phir se|fir se|kabhi bhi|kabhi)\s+(call|phone|fone|kol)\s+(mat|na|nahi|nahin)\b'
+  - '\b(mera|hamara)\s+(number|no)\s+(hata|hatao|hata do|delete|remove)'
+  - '\blist\s+se\s+(hata|hatao|nikal|nikalo|remove)'
+  - '(दोबारा|दुबारा|फिर से|कभी भी|कभी)\s*(कॉल|काल|फोन|फ़ोन)\s*(मत|ना|नहीं)'
+  - '(मेरा|हमारा)\s*(नंबर|नम्बर)\s*(हटा|हटाओ|डिलीट)'
+  - '(लिस्ट|सूची)\s*से\s*(हटा|हटाओ|निकाल)'
+
+# Pre-recorded fillers played the moment the customer's words are recognized, while the
+# reply is prepared. PLACEHOLDER wording.
+acknowledgments:
+  en: ["Hmm.", "I see.", "Right."]
+  hi: ["जी।", "अच्छा।", "हम्म।"]
+
+# Excel / console result labels (workers/call_log.py), decided from the states reached.
+sales_followup_states: [INTERESTED]
+not_interested_states: [NOT_INTERESTED]
+
+max_call_duration_seconds: 420   # PLACEHOLDER — confirm with client
+retry_limits:
+  per_question: 2
+  per_state: 3
+
+qualification_ref: config/qualification/seller-flow.yaml

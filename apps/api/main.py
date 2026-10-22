@@ -6,8 +6,9 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
-from apps.api.routers import campaigns, demo, flows, health, leads, media, webhooks
+from apps.api.routers import campaigns, console, demo, flows, health, leads, media, webhooks
 from config.settings import get_settings
 from observability.logging.logging_config import configure_logging
 from observability.tracing.tracing import configure_tracing
@@ -51,13 +52,26 @@ async def lifespan(app: FastAPI):
     configure_logging()
     configure_tracing()
     warmup = asyncio.create_task(_prepare_ai_backends())
+    tasks = [warmup]
+    s = get_settings()
+    if s.console_dialer_enabled and s.console_password:
+        tasks.append(asyncio.create_task(console.run_console_dialer()))
     yield
-    warmup.cancel()
-    with contextlib.suppress(asyncio.CancelledError, Exception):
-        await warmup
+    for task in tasks:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await task
 
 
 app = FastAPI(title="voice-sales-agent", lifespan=lifespan)
+# The client console (web/) calls the API from the browser. Only the configured
+# origins; every console route also needs a login token (apps/api/console_auth.py).
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[o.strip() for o in get_settings().console_allowed_origins.split(",") if o.strip()],
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
+    allow_headers=["Authorization", "Content-Type"],
+)
 
 app.include_router(health.router)
 app.include_router(campaigns.router)
@@ -66,3 +80,5 @@ app.include_router(webhooks.router)
 app.include_router(flows.router)
 app.include_router(media.router)
 app.include_router(demo.router)
+app.include_router(console.public_router)
+app.include_router(console.router)

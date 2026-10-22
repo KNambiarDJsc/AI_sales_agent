@@ -48,6 +48,11 @@ class LLMProvider(ABC):
         transport errors should still raise, since those are retriable failures, not
         validation failures."""
 
+    async def warm_up(self, messages: list[LLMMessage], json_schema: dict, schema_name: str = "agent_response") -> None:
+        """Optional: prepare for an upcoming request with this prompt prefix (open the
+        connection, fill a prompt cache). Never required for correctness; default no-op."""
+        return None
+
     @abstractmethod
     def propose_stream(
         self,

@@ -1,0 +1,53 @@
+# Campaign prompt for config/scripts/seller-flow.yaml — the ONLY source of facts the
+# agent may state on a call (CLAUDE.md rule 9 + the client's guardrail "avoid
+# unsupported claims or invented information").
+#
+# Every answer marked PLACEHOLDER is withheld from the agent: for those topics it
+# acknowledges the concern and offers the specialist callback instead of answering.
+# The client fills these in to let the agent handle the objection itself.
+
+campaign_id: seller-flow
+
+product_info: >
+  We help businesses start selling their products on Amazon and other online
+  marketplaces, and a specialist from our team guides them through getting set up.
+
+target_customer: >
+  Business owners and decision-makers (shops, manufacturers, wholesalers, brands) who may
+  want to sell their products online.
+
+# Verified answers, one per concern the client listed. Shown to the agent as-is.
+knowledge:
+  pricing: >
+    PLACEHOLDER: what it costs the seller (our fees, marketplace fees/commission), in the
+    client's words.
+  returns: >
+    PLACEHOLDER: how returns work and who bears the cost.
+  payments: >
+    PLACEHOLDER: when and how sellers get paid (settlement cycle, method).
+  operations: >
+    PLACEHOLDER: what the seller has to do day to day (listing, packing, shipping,
+    inventory) and what our team handles.
+  trust: >
+    PLACEHOLDER: who we are, how long we've done this, sellers onboarded, any proof the
+    client is happy for us to mention.
+  getting_started: >
+    PLACEHOLDER: what the specialist call covers and what the seller needs ready (GST,
+    bank account, product photos...).
+
+# How to handle each concern — conversational approach only, no facts (facts live in
+# `knowledge`). From the client's brief: respond to the actual concern, move the
+# conversation forward, don't repeatedly pitch.
+objection_playbook:
+  pricing: "Ask what they're comparing against if unclear; give the verified cost picture; offer the specialist for exact numbers for their products."
+  returns: "Acknowledge returns are a real worry for sellers; explain the verified return process; ask what kind of returns they're worried about."
+  payments: "Explain the verified payment cycle plainly; if they had a bad payment experience elsewhere, ask what happened."
+  operations: "Find out what part sounds like work to them (shipping, listings, stock); explain only the verified split of who does what."
+  trust: "Don't argue. Share only verified facts about us; offer that the specialist call is free of obligation if the knowledge says so, otherwise offer the call to answer their questions."
+  timing: "If now isn't the right time, ask when would be better and move to a callback."
+  other: "Ask one short question to understand it; if you can't answer from verified knowledge, offer the specialist callback."
+
+language: "en-IN"
+
+call_disclosure: >
+  PLACEHOLDER — see config/prompts/system_prompt.yaml:identity_disclosure. Must match.

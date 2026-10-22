@@ -74,6 +74,7 @@ class CallRow:
     campaign: str
     provider: str
     attempt_id: str
+    lead_id: str = ""
 
 
 def _agreed(
@@ -111,15 +112,20 @@ def _is_logged(provider: str, campaign_name: str) -> bool:
     return not (pattern and re.search(pattern, campaign_name or ""))
 
 
-async def collect_rows() -> list[CallRow]:
+async def collect_rows(campaign_ids: set | None = None, apply_skip_filter: bool = True) -> list[CallRow]:
+    """One row per call attempt, oldest first. `campaign_ids` limits it to those
+    campaigns (the client console); otherwise every real call (see _is_logged)."""
     rows: list[CallRow] = []
     scripts: dict[str, tuple[set[str], set[str]]] = {}
     async with session_scope() as session:
-        attempts = (await session.execute(select(CallAttempt).order_by(CallAttempt.created_at))).scalars().all()
+        query = select(CallAttempt).order_by(CallAttempt.created_at)
+        if campaign_ids is not None:
+            query = query.where(CallAttempt.campaign_id.in_(list(campaign_ids)))
+        attempts = (await session.execute(query)).scalars().all()
         for attempt in attempts:
             lead = await session.get(Lead, attempt.lead_id)
             campaign = await session.get(Campaign, attempt.campaign_id)
-            if lead is None or campaign is None or not _is_logged(attempt.provider, campaign.name):
+            if lead is None or campaign is None or (apply_skip_filter and not _is_logged(attempt.provider, campaign.name)):
                 continue
             if campaign.script_id not in scripts:
                 try:
@@ -193,6 +199,7 @@ async def collect_rows() -> list[CallRow]:
                 campaign=campaign.name,
                 provider=attempt.provider,
                 attempt_id=str(attempt.id),
+                lead_id=str(lead.id),
             ))
     return rows
 

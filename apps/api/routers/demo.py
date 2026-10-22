@@ -69,7 +69,6 @@ router = APIRouter(tags=["demo"])
 
 DEMO_TENANT_NAME = "Browser Demo Tenant"
 DEMO_CAMPAIGN_NAME = "Browser Demo Campaign"
-DEMO_SCRIPT_ID = "product-a"
 
 # Server-side backstop for accidental clicks (the page filters them first): less than
 # 0.3 s of 16 kHz PCM16 can't hold a real utterance.
@@ -93,7 +92,7 @@ async def _get_or_create_demo_campaign(session) -> tuple[Tenant, Campaign]:
         campaign = Campaign(
             tenant_id=tenant.id,
             name=DEMO_CAMPAIGN_NAME,
-            script_id=DEMO_SCRIPT_ID,
+            script_id=get_settings().console_script_id,
             script_version=1,
             status="active",
             telephony_provider="browser_demo",
@@ -102,9 +101,13 @@ async def _get_or_create_demo_campaign(session) -> tuple[Tenant, Campaign]:
             timezone="Asia/Kolkata",
             max_concurrent_calls=10,
             max_call_duration_seconds=900,
+            config={"campaign_prompt_path": get_settings().console_campaign_prompt},
         )
         session.add(campaign)
         await session.flush()
+    elif campaign.script_id != get_settings().console_script_id:  # same flow as the console's calls
+        campaign.script_id = get_settings().console_script_id
+        campaign.config = {**campaign.config, "campaign_prompt_path": get_settings().console_campaign_prompt}
     return tenant, campaign
 
 
@@ -352,6 +355,7 @@ async def demo_ws(websocket: WebSocket) -> None:
     try:
         await send_json({"type": "info", "text": "Connected — the agent will greet you now."})
         spawn(opening_line())
+        spawn(engine.warm_up())
 
         async def prerecord_later() -> None:
             await asyncio.sleep(1.5)  # let the greeting's audio go first

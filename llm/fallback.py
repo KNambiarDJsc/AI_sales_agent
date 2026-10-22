@@ -39,6 +39,10 @@ class FallbackLLMProvider(LLMProvider):
         self.backend = "local"
         return await self._local.propose(messages, json_schema, schema_name)
 
+    async def warm_up(self, messages: list[LLMMessage], json_schema: dict, schema_name: str = "agent_response") -> None:
+        if use_openai():
+            await self._openai.warm_up(messages, json_schema, schema_name)
+
     async def propose_stream(
         self, messages: list[LLMMessage], json_schema: dict, schema_name: str = "agent_response"
     ) -> AsyncIterator[str]:

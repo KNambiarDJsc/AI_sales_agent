@@ -38,7 +38,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from config.settings import get_settings
 from database.models import Turn, TranscriptSegment
 from database.session import session_scope
-from llm.base import LLMProvider
+from llm.base import LLMMessage, LLMProvider
 from orchestrator.context import ConversationContext
 from orchestrator.prompts import build_messages
 from orchestrator.schema import AgentResponseProposal, ToolCallProposal, build_agent_response_schema
@@ -538,6 +538,18 @@ class ConversationEngine:
             return None
         self._ack_index += 1
         return options[self._ack_index % len(options)]
+
+    async def warm_up(self) -> None:
+        """Get the LLM ready for the customer's first reply while the greeting plays: the
+        same instructions and schema as that turn (see LLMProvider.warm_up). Best effort —
+        a failure here only means the first reply is as slow as it would have been."""
+        if not self._settings.llm_warm_up:
+            return
+        instructions = build_messages(self._state_machine.script, self._context)[0]
+        try:
+            await self._llm.warm_up([instructions, LLMMessage(role="user", content="Hello?")], self._turn_schema(True))
+        except Exception as exc:  # noqa: BLE001
+            logger.info("llm_warm_up_failed", extra={"error": type(exc).__name__})
 
     def all_acknowledgments(self) -> list[str]:
         """Every configured acknowledgment, for recording them before the call needs them."""
