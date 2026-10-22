@@ -9,10 +9,12 @@ catches up on the next rebuild. `schedule_call_log_refresh()` is called by
 written (they are persisted fire-and-forget). `python scripts/export_call_log.py`
 rebuilds it on demand.
 
-"Agreed to sales team?" is decided by the application, not taken from the LLM: Yes if
+"Lead result" is decided by the application, not taken from the LLM: Interested if
 the conversation reached one of the script's `sales_followup_states` (config) or a
-recorded qualification says a sales follow-up is required; DNC and callbacks are
-reported as such, and calls that never connected by the provider's status.
+recorded qualification says a sales follow-up is required; Not interested if it
+reached one of `not_interested_states`; DNC and callbacks are reported as such, a
+conversation with none of these is "Unclear", and calls that never connected show
+the provider's status.
 """
 from __future__ import annotations
 
@@ -42,7 +44,7 @@ _write_lock = threading.Lock()
 _pending: asyncio.Task | None = None
 
 CALL_COLUMNS = [
-    ("Call time", 19), ("Name", 18), ("Business", 20), ("Phone", 16), ("Agreed to sales team?", 20),
+    ("Call time", 19), ("Name", 18), ("Business", 20), ("Phone", 16), ("Lead result", 20),
     ("Outcome", 24), ("Call status", 13), ("Talk time (s)", 12), ("Final state", 15), ("Path through script", 45),
     ("Callback time", 19), ("Summary", 40), ("Facts captured", 40), ("Transcript", 90), ("Campaign", 22),
     ("Provider", 11), ("Call attempt id", 38),
@@ -74,16 +76,21 @@ class CallRow:
     attempt_id: str
 
 
-def _agreed(attempt: CallAttempt, path: list[str], followup_states: set[str], qualification, callback) -> str:
+def _agreed(
+    attempt: CallAttempt, path: list[str], followup_states: set[str], qualification, callback,
+    not_interested_states: set[str] = frozenset(),
+) -> str:
     if attempt.outcome == "do_not_call":
         return "Do not call"
     if followup_states & set(path) or (qualification is not None and qualification.sales_followup_required):
-        return "Yes"
+        return "Interested"
     if callback is not None:
         return "Callback requested"
     if not path:
         return NEVER_CONNECTED.get(attempt.status, "Not connected")
-    return "No"
+    if not_interested_states & set(path):
+        return "Not interested"
+    return "Unclear"
 
 
 def _local(dt: datetime | None, tz: str) -> datetime | None:
@@ -106,7 +113,7 @@ def _is_logged(provider: str, campaign_name: str) -> bool:
 
 async def collect_rows() -> list[CallRow]:
     rows: list[CallRow] = []
-    scripts: dict[str, set[str]] = {}
+    scripts: dict[str, tuple[set[str], set[str]]] = {}
     async with session_scope() as session:
         attempts = (await session.execute(select(CallAttempt).order_by(CallAttempt.created_at))).scalars().all()
         for attempt in attempts:
@@ -116,9 +123,10 @@ async def collect_rows() -> list[CallRow]:
                 continue
             if campaign.script_id not in scripts:
                 try:
-                    scripts[campaign.script_id] = set(load_script_by_id(campaign.script_id).sales_followup_states)
+                    script = load_script_by_id(campaign.script_id)
+                    scripts[campaign.script_id] = (set(script.sales_followup_states), set(script.not_interested_states))
                 except (FileNotFoundError, KeyError, ValueError):
-                    scripts[campaign.script_id] = set()
+                    scripts[campaign.script_id] = (set(), set())
             conversation = (await session.execute(
                 select(Conversation).where(Conversation.call_attempt_id == attempt.id)
                 .order_by(Conversation.created_at.desc()).limit(1)
@@ -170,7 +178,8 @@ async def collect_rows() -> list[CallRow]:
                 name=lead.contact_name or "",
                 business=lead.business_name or "",
                 phone=lead.phone_e164,
-                agreed=_agreed(attempt, path, scripts[campaign.script_id], qualification, callback),
+                agreed=_agreed(attempt, path, scripts[campaign.script_id][0], qualification, callback,
+                               scripts[campaign.script_id][1]),
                 outcome=attempt.outcome or "",
                 call_status=attempt.status,
                 talk_seconds=talk,
@@ -192,7 +201,7 @@ def write_workbook(rows: list[CallRow], path: Path) -> None:
     wb = Workbook()
     calls = wb.active
     calls.title = "Calls"
-    yes = wb.create_sheet("Agreed to sales team")
+    yes = wb.create_sheet("Interested leads")
     header_font, header_fill = Font(bold=True, color="FFFFFF"), PatternFill("solid", fgColor="1F4E78")
     for sheet, columns in ((calls, CALL_COLUMNS), (yes, YES_COLUMNS)):
         sheet.append([name for name, _ in columns])
@@ -211,7 +220,7 @@ def write_workbook(rows: list[CallRow], path: Path) -> None:
         ])
         r = calls.max_row
         calls.cell(row=r, column=1).number_format = "yyyy-mm-dd hh:mm"
-        if row.agreed == "Yes":
+        if row.agreed == "Interested":
             calls.cell(row=r, column=5).fill = green
             yes.append([row.call_time, row.name, row.business, row.phone, row.last_customer_words, row.summary,
                         row.attempt_id])

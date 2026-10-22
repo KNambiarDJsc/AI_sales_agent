@@ -30,6 +30,13 @@ class OpenAITTSProvider(TTSProvider):
         settings = get_settings()
         self._model = settings.openai_tts_model
         self._voice = settings.openai_tts_voice
+        # Only gpt-4o-mini-tts-style models take speaking instructions; tts-1 rejects them.
+        # Sent via extra_body: the pinned SDK (openai==1.58.1) predates the parameter.
+        self._extra = (
+            {"extra_body": {"instructions": settings.openai_tts_instructions}}
+            if settings.openai_tts_instructions and not self._model.startswith("tts-")
+            else {}
+        )
         self._active_cancel_events: set[asyncio.Event] = set()
 
     async def synthesize_stream(self, text: str) -> AsyncIterator[bytes]:
@@ -41,6 +48,7 @@ class OpenAITTSProvider(TTSProvider):
                 voice=self._voice,
                 input=text,
                 response_format="pcm",
+                **self._extra,
             ) as response:
                 # 1200 bytes = 25 ms of 24 kHz PCM16. A 4096-byte chunk held the first
                 # ~85 ms of audio back until it was full, adding that much latency to

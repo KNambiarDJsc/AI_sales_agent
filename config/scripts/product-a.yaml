@@ -9,10 +9,23 @@
 script_id: product-a
 version: 1
 language: en-IN
+# How the agent chooses the language it speaks:
+#   fixed          — always `language`, whatever the customer speaks.
+#   match_customer — start in `language`, then reply in whichever of
+#                    `supported_languages` the customer is speaking (with en + hi this
+#                    includes Hinglish), switching when they switch.
+# match_customer requested by the project owner 2026-10-22. NOTE: an earlier client
+# request asked for a single fixed language — PLACEHOLDER, confirm with the client.
+language_policy: match_customer
+supported_languages: [en-IN, hi-IN]
 
 campaign:
   objective: "Amazon / online selling lead qualification"
 
+# fallback_response: the fixed line the application speaks itself (invalid LLM output,
+# timeouts, the DNC backstop). With language_policy match_customer it may hold one line
+# per language (en / hi); the one matching the customer's language is used.
+# Hindi wording is a PLACEHOLDER translation — client to confirm.
 states:
   INTRO:
     objective: >
@@ -27,8 +40,9 @@ states:
     mandatory_questions:
       - "Confirm you're speaking with {contact_name} at {business_name}."
     allowed_tools: [end_call]
-    fallback_response: >
-      Sorry, could you tell me if this is {business_name}?
+    fallback_response:
+      en: "Sorry, could you tell me if this is {business_name}?"
+      hi: "माफ़ कीजिए, क्या यह {business_name} है?"
     transitions_on:
       confirmed_identity: PERMISSION
       wrong_person: WRONG_NUMBER
@@ -41,7 +55,9 @@ states:
     mandatory_questions:
       - "Is now an okay time for a quick two-minute call about selling your products online?"
     allowed_tools: [schedule_callback, mark_dnc, end_call]
-    fallback_response: "No problem — would there be a better time to call back?"
+    fallback_response:
+      en: "No problem — would there be a better time to call back?"
+      hi: "कोई बात नहीं — क्या किसी और समय कॉल करना ठीक रहेगा?"
     transitions_on:
       granted: DISCOVERY
       bad_time: CALLBACK
@@ -56,7 +72,9 @@ states:
       - "Are you currently selling your products on Amazon or any online marketplace?"
       - "Would you be interested in exploring selling your product on Amazon / online?"
     allowed_tools: [update_lead, end_call]
-    fallback_response: "Just to confirm — are you open to selling your product online?"
+    fallback_response:
+      en: "Just to confirm — are you open to selling your product online?"
+      hi: "बस पक्का करने के लिए — क्या आप अपना product online बेचना चाहेंगे?"
     transitions_on:
       explicit_interest: QUALIFICATION
       already_selling: QUALIFICATION   # still worth qualifying — may want to expand/improve
@@ -73,7 +91,9 @@ states:
       - "What product or products are you looking to sell?"                 # PLACEHOLDER
       - "Would you be open to a follow-up call from our sales team to discuss this further?"
     allowed_tools: [update_lead, create_qualification, schedule_callback, end_call]
-    fallback_response: "Could you tell me a bit more about the product you'd want to sell?"
+    fallback_response:
+      en: "Could you tell me a bit more about the product you'd want to sell?"
+      hi: "आप कौन सा product बेचना चाहते हैं, उसके बारे में थोड़ा और बताएंगे?"
     # Labels are what the LLM picks as `intent`, so they name what the *customer* did.
     # They were "qualified" / "wants_callback": a "yes" to this state's own question
     # ("open to a follow-up call from our sales team?") is literally wanting a call,
@@ -89,7 +109,9 @@ states:
       Acknowledge a stated objection (e.g. price, timing, skepticism) using only
       information present in product_info — never invent claims.
     allowed_tools: [update_lead, schedule_callback, end_call]
-    fallback_response: "That's a fair point — would it help if our team called to explain further?"
+    fallback_response:
+      en: "That's a fair point — would it help if our team called to explain further?"
+      hi: "आपकी बात सही है — क्या हमारी टीम आपको कॉल करके और समझा दे?"
     transitions_on:
       resolved: QUALIFICATION
       unresolved: UNCERTAIN
@@ -98,7 +120,9 @@ states:
   INTERESTED:
     objective: "Confirm qualification and close the call positively."
     allowed_tools: [create_qualification, update_lead, end_call]
-    fallback_response: "Great — thank you, our team will be in touch shortly."
+    fallback_response:
+      en: "Great — thank you, our team will be in touch shortly."
+      hi: "बहुत बढ़िया — धन्यवाद, हमारी टीम जल्द ही आपसे बात करेगी।"
     transitions_on:
       done: END
 
@@ -107,14 +131,18 @@ states:
     mandatory_questions:
       - "What day and time works best for a follow-up call?"
     allowed_tools: [schedule_callback, end_call]
-    fallback_response: "No problem, when would be a better time to reach you?"
+    fallback_response:
+      en: "No problem, when would be a better time to reach you?"
+      hi: "कोई बात नहीं, आपसे बात करने का सही समय कब रहेगा?"
     transitions_on:
       scheduled: END
 
   NOT_INTERESTED:
     objective: "Politely close the call. Optionally record a reason if offered."
     allowed_tools: [update_lead, end_call]
-    fallback_response: "Understood, thank you for your time."
+    fallback_response:
+      en: "Understood, thank you for your time."
+      hi: "समझ गया, आपके समय के लिए धन्यवाद।"
     transitions_on:
       done: END
 
@@ -122,7 +150,9 @@ states:
     objective: "Confirm the DNC request, apologize, and end the call immediately."
     mandatory_questions: []
     allowed_tools: [mark_dnc, end_call]
-    fallback_response: "Understood — we won't call again. Apologies for the disturbance."
+    fallback_response:
+      en: "Understood — we won't call again. Apologies for the disturbance."
+      hi: "समझ गया — हम आपको दोबारा कॉल नहीं करेंगे। परेशानी के लिए माफ़ी।"
     transitions_on:
       done: END
 
@@ -131,14 +161,18 @@ states:
       Low-confidence outcome. Do not force a yes/no. Offer a follow-up path and let a
       human review the call.
     allowed_tools: [update_lead, schedule_callback, create_qualification, end_call]
-    fallback_response: "That's okay — would it be alright if our team followed up by call or message?"
+    fallback_response:
+      en: "That's okay — would it be alright if our team followed up by call or message?"
+      hi: "कोई बात नहीं — क्या हमारी टीम आपसे कॉल या मैसेज से बात कर सकती है?"
     transitions_on:
       done: END
 
   WRONG_NUMBER:
     objective: "Confirm wrong number/person and end the call."
     allowed_tools: [update_lead, end_call]
-    fallback_response: "Apologies for the confusion, have a good day."
+    fallback_response:
+      en: "Apologies for the confusion, have a good day."
+      hi: "गलतफ़हमी के लिए माफ़ी, आपका दिन शुभ हो।"
     transitions_on:
       done: END
 
@@ -166,12 +200,31 @@ dnc_phrases:
   - '\b(do[- ]?not[- ]?call|don''t call|dnc|dnd) (list|registry|register)\b'
   - '\b(unsubscribe|opt me out|opt out of (these|your) calls)\b'
   - '\b(i|we) (do ?n[o''`’]?t|never) want (any )?(more )?(calls|to be called|you to call)\b(?! (right )?now| today| at the moment| this (week|month))'
+  # Hindi / Hinglish (language_policy: match_customer). "dobara/kabhi ... mat" = "again/
+  # ever ... don't"; a bare "call mat karo" is NOT here — "abhi call mat karo, baad mein
+  # karna" means "don't call now, call later".
+  - '\b(dobara|dubara|phir se|fir se|kabhi bhi|kabhi)\s+(call|phone|fone|kol)\s+(mat|na|nahi|nahin)\b'
+  - '\b(mera|hamara)\s+(number|no)\s+(hata|hatao|hata do|delete|remove)'
+  - '\blist\s+se\s+(hata|hatao|nikal|nikalo|remove)'
+  - '(दोबारा|दुबारा|फिर से|कभी भी|कभी)\s*(कॉल|काल|फोन|फ़ोन)\s*(मत|ना|नहीं)'
+  - '(मेरा|हमारा)\s*(नंबर|नम्बर)\s*(हटा|हटाओ|डिलीट)'
+  - '(लिस्ट|सूची)\s*से\s*(हटा|हटाओ|निकाल)'
+
+# Said the instant the customer stops talking — recorded once in advance, so it plays
+# with no delay — while the real reply is prepared (2-3 s of network round trips).
+# Rotated, in the customer's language (language_policy). Remove to turn off.
+# PLACEHOLDER wording — client to confirm.
+acknowledgments:
+  en: ["Okay.", "Right.", "I see.", "Got it."]
+  hi: ["जी।", "अच्छा।", "ठीक है।", "जी, समझ गया।"]
 
 # States that mean "the lead agreed to talk to the sales team". A call that reached
-# any of them is marked "Yes" in the call log (exports/call_log.xlsx, see
+# any of them is marked "Interested" in the call log (exports/call_log.xlsx, see
 # workers/call_log.py) — decided from the state machine's record, not from anything
 # the LLM asserts.
 sales_followup_states: [INTERESTED]
+# States that mean the lead declined — "Not interested" in the call log.
+not_interested_states: [NOT_INTERESTED]
 
 max_call_duration_seconds: 420   # PLACEHOLDER — confirm with client
 retry_limits:

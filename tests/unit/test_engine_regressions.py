@@ -156,6 +156,14 @@ async def test_long_intent_does_not_break_turn_persistence(monkeypatch):
         ("I don't want calls right now, call me next week.", False),
         ("Don't text me, call me instead.", False),
         ("Unsubscribe me please.", True),
+        # Hindi / Hinglish
+        ("Mujhe dobara call mat karna.", True),
+        ("Please mera number hata do apni list se.", True),
+        ("दोबारा कॉल मत करना।", True),
+        ("मेरा नंबर हटा दो।", True),
+        ("Abhi call mat karo, baad mein karna.", False),  # "not now, call later"
+        ("अभी फोन मत करो, शाम को करना।", False),
+        ("Haan, sales team ko bolo mujhe call kare.", False),
     ],
 )
 def test_dnc_phrases_from_config_are_specific(text, expected):
@@ -186,6 +194,40 @@ async def test_dnc_backstop_records_dnc_without_the_llm(monkeypatch):
     assert invoked == [("mark_dnc", "DO_NOT_CALL")]
     assert result.end_call is True and result.new_state == "DO_NOT_CALL"
     assert spoken == ["Understood — we won't call again. Apologies for the disturbance."]  # config text, spoken once
+
+
+async def test_dnc_backstop_answers_a_hindi_request_in_hindi(monkeypatch):
+    # match_customer calls: the application's own fixed lines follow the customer's
+    # language (config holds en + hi versions) — an English apology to a Hindi speaker
+    # was caught in the multilingual eval.
+    from orchestrator.state_machine import load_script_by_id
+
+    _patch_session_scope(monkeypatch, [])
+
+    class OkRegistry(ToolRegistry):
+        async def invoke(self, ctx, name, arguments):
+            return ToolResult(success=True, message="Number suppressed")
+
+    engine = ConversationEngine(FakeNonStreamingLLM(""), StateMachine(load_script_by_id("product-a"), "INTRO"),
+                                _context(), tool_registry=OkRegistry())
+    result, spoken = await _run(engine, "दोबारा कॉल मत करना, मेरा नंबर हटा दो।")
+    await asyncio.sleep(0.05)
+    assert result.new_state == "DO_NOT_CALL" and result.end_call is True
+    assert spoken == ["समझ गया — हम आपको दोबारा कॉल नहीं करेंगे। परेशानी के लिए माफ़ी।"]
+
+
+def test_fallback_lines_follow_the_customers_language():
+    from orchestrator.state_machine import load_script_by_id
+
+    sm = StateMachine(load_script_by_id("product-a"), "CALLBACK")
+    assert sm.fallback_response() == "No problem, when would be a better time to reach you?"  # default: English
+    sm.note_customer_text("अभी मैं busy हूँ")
+    assert sm.fallback_response() == "कोई बात नहीं, आपसे बात करने का सही समय कब रहेगा?"
+    sm.note_customer_text("Okay, call me tomorrow.")
+    assert sm.fallback_response() == "No problem, when would be a better time to reach you?"
+    fixed = StateMachine(load_script_by_id("product-a").model_copy(update={"language_policy": "fixed"}), "CALLBACK")
+    fixed.note_customer_text("अभी मैं busy हूँ")
+    assert fixed.fallback_response() == "No problem, when would be a better time to reach you?"
 
 
 async def test_nothing_changes_before_the_customer_has_spoken(monkeypatch):

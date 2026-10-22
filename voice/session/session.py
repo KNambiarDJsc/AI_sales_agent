@@ -42,6 +42,7 @@ from voice.audio.processing import (
     tts_pcm16_to_telephony_pcm16,
 )
 from voice.session.sentence_split import split_into_speech_chunks
+from voice.session import acknowledgments
 from voice.session.speech_pipeline import phrases_from, synthesize_phrases
 from voice.turn_taking.turn_taking import TurnEvent, TurnTaker
 from voice.vad.vad import VoiceActivityDetector
@@ -99,11 +100,25 @@ class VoiceSession:
         self._resample_stt = ResampleState()
 
         self._speaking_task: asyncio.Task | None = None
+        self._background: set[asyncio.Task] = set()
         self._first_frame_sent_at: float | None = None  # set in _speak(); see _process_vad_frame
         self._ended = False
 
     async def start(self) -> None:
         self._stt_stream = await self._stt_provider.start_stream()
+        self._prerecord_acknowledgments(delay_s=1.5)  # after the greeting has started
+
+    def _prerecord_acknowledgments(self, delay_s: float = 0.0) -> None:
+        phrases = self._engine.all_acknowledgments()
+        if not phrases:
+            return
+
+        async def _later() -> None:
+            await asyncio.sleep(delay_s)
+            await acknowledgments.prerecord(self._tts_provider, phrases)
+
+        self._background.add(task := asyncio.create_task(_later()))
+        task.add_done_callback(self._background.discard)
 
     @property
     def ended(self) -> bool:
@@ -213,7 +228,25 @@ class VoiceSession:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
 
+    def _acknowledge(self) -> None:
+        """Say a short pre-recorded "Okay." / "जी।" right now, while the transcript and
+        the reply are being prepared (voice/session/acknowledgments.py). Skipped if the
+        agent is still talking, or if the phrase isn't recorded yet (then it's recorded
+        in the background for next time — never synthesized on this path)."""
+        if self._speaking_task is not None and not self._speaking_task.done():
+            return
+        text = self._engine.acknowledgment()
+        if text is None:
+            return
+        pcm = acknowledgments.cached(self._tts_provider, text)
+        if pcm is None:
+            self._prerecord_acknowledgments()
+            return
+        self._first_frame_sent_at = None
+        self._speaking_task = asyncio.create_task(self._play(_once(pcm)))
+
     async def _on_turn_ended(self) -> None:
+        self._acknowledge()
         # Timing instrumentation (not guessing where per-turn latency goes): logs how
         # long the STT-final wait itself took, separate from the LLM/TTS time logged
         # in _run_agent_turn/_speak — added live while chasing a reported 4-5s gap.
@@ -254,11 +287,29 @@ class VoiceSession:
 
     def _start_speaking(self, text: str) -> None:
         self._first_frame_sent_at = None  # reset; _speak() sets this once real audio goes out
-        self._speaking_task = asyncio.create_task(self._speak(text))
+        self._speaking_task = asyncio.create_task(self._after(self._speaking_task, self._speak(text)))
 
     def _start_speaking_phrases(self, phrases: AsyncIterator[str]) -> None:
         self._first_frame_sent_at = None
-        self._speaking_task = asyncio.create_task(self._speak_phrases(phrases))
+        self._speaking_task = asyncio.create_task(self._after(self._speaking_task, self._speak_phrases(phrases)))
+
+    @staticmethod
+    async def _after(previous: asyncio.Task | None, speech) -> None:
+        """Play `speech` once `previous` (what was playing when this was queued — an
+        acknowledgment) has finished: never two audio streams interleaved on the line.
+        A barge-in cancels this task, which also cancels `previous` while we wait on
+        it — so the acknowledgment stops too."""
+        try:
+            if previous is not None and not previous.done():
+                await previous
+        except asyncio.CancelledError:
+            if asyncio.current_task().cancelling():
+                speech.close()
+                raise  # we were cancelled (barge-in)
+            # previous was cancelled on its own (e.g. a barge-in that already ended it)
+        except Exception:  # noqa: BLE001 - a failed acknowledgment must not drop the reply
+            logger.exception("acknowledgment_playback_failed")
+        await speech
 
     async def _run_agent_turn(self, customer_text: str) -> None:
         turn_start = asyncio.get_event_loop().time()
@@ -308,6 +359,11 @@ class VoiceSession:
         """Sends the audio for `phrases` (which may still be arriving — see
         `_run_agent_turn`), synthesizing each as soon as it exists
         (`voice/session/speech_pipeline.py`) and pacing frames in real time."""
+        await self._play(synthesize_phrases(self._tts_provider, phrases))
+
+    async def _play(self, audio: AsyncIterator[bytes]) -> None:
+        """Sends TTS-rate PCM16 `audio` down the call, converted to the telephony
+        encoding and paced in real time."""
         bytes_per_sample = 1 if self._audio_encoding == "mulaw" else 2
         loop = asyncio.get_event_loop()
         next_send_time = loop.time()
@@ -315,17 +371,10 @@ class VoiceSession:
         first_frame_logged = False
 
         async def _send_paced(frame: bytes) -> None:
-            # Real-time pacing (Section 16/18): OpenAI's TTS stream doesn't arrive at a
-            # steady rate — chunks can burst well ahead of real time. Without this, we
-            # hand the telephony leg a burst of many frames almost instantly followed
-            # by a gap, which is a classic cause of choppy/stuttery playback on a phone
-            # line (the receiving side expects roughly one frame every frame_ms, not a
-            # burst). We pace to a virtual clock advancing by each frame's own actual
-            # duration (so the final, possibly-shorter flush()'d frame paces correctly
-            # too) rather than sleeping a fixed amount per send. If processing ever
-            # falls behind (e.g. a slow TTS chunk), we reset the baseline to "now"
-            # instead of bursting to catch up — catching up would just recreate the
-            # exact burst this exists to prevent.
+            # Real-time pacing (Section 16/18): see the history of this function — OpenAI's
+            # TTS stream can burst ahead of real time, and a burst then a gap is choppy
+            # on a phone line. Pace to a virtual clock advancing by each frame's actual
+            # duration; if processing falls behind, reset to "now" rather than burst.
             nonlocal next_send_time, first_frame_logged
             now = loop.time()
             send_time = now
@@ -340,7 +389,6 @@ class VoiceSession:
             duration_s = (len(frame) / bytes_per_sample) / TELEPHONY_SAMPLE_RATE_HZ
             next_send_time = send_time + duration_s
 
-        audio = synthesize_phrases(self._tts_provider, phrases)
         try:
             frame_chunker = FrameChunker(
                 frame_bytes=outbound_frame_bytes(self._settings.outbound_frame_ms, bytes_per_sample=bytes_per_sample)
@@ -366,8 +414,14 @@ class VoiceSession:
 
     async def close(self) -> None:
         self._ended = True
+        for task in list(self._background):
+            task.cancel()
         if self._speaking_task is not None and not self._speaking_task.done():
             self._speaking_task.cancel()
         if self._stt_stream is not None:
             await self._stt_stream.close()
         await self._tts_provider.close()
+
+
+async def _once(pcm: bytes) -> AsyncIterator[bytes]:
+    yield pcm

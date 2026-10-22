@@ -144,6 +144,7 @@ class ConversationEngine:
         self._context = context
         self._tools = tool_registry or get_default_registry()
         self._settings = get_settings()
+        self._ack_index = -1  # rotation for acknowledgment()
 
     async def run_turn(
         self,
@@ -166,6 +167,7 @@ class ConversationEngine:
         customer_turn_index: int | None = None
         if customer_text.strip():
             self._context.append_turn("customer", customer_text, self._state_machine.current_state)
+            self._state_machine.note_customer_text(customer_text)
             customer_turn_index = len(self._context.history) - 1
 
         if customer_turn_index is not None and self._state_machine.script.is_dnc_request(customer_text):
@@ -291,7 +293,7 @@ class ConversationEngine:
         configured line first — same speech-before-tools order as every turn — then
         records the suppression and ends the call."""
         script = self._state_machine.script
-        speech = script.fallback_for("DO_NOT_CALL", self._context.lead_fields)
+        speech = script.fallback_for("DO_NOT_CALL", self._context.lead_fields, self._state_machine.customer_language)
         await delivery.whole(speech)
 
         ctx = ToolContext(
@@ -521,6 +523,25 @@ class ConversationEngine:
             ),
         )
         return text
+
+    def acknowledgment(self) -> str | None:
+        """The next short acknowledgment ("Okay." / "जी।") from the script config, in
+        the customer's current language (else the script's default), rotating so it
+        doesn't repeat back to back. Spoken by the voice layer the instant the customer
+        stops talking, before this turn's reply exists — not part of the turn (rule 10
+        governs the reply). None when the script configures none."""
+        script = self._state_machine.script
+        default = script.language.split("-")[0]
+        language = self._state_machine.customer_language or default
+        options = script.acknowledgments.get(language) or script.acknowledgments.get(default) or []
+        if not options:
+            return None
+        self._ack_index += 1
+        return options[self._ack_index % len(options)]
+
+    def all_acknowledgments(self) -> list[str]:
+        """Every configured acknowledgment, for recording them before the call needs them."""
+        return [phrase for phrases in self._state_machine.script.acknowledgments.values() for phrase in phrases]
 
     @property
     def current_state(self) -> str:

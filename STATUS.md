@@ -4,6 +4,51 @@ Last updated: 2026-10-07 (real-time speech + local tuning pass). Read this befor
 it tracks what's real vs. placeholder, and what happens when client materials (code,
 prompts, scripts, credentials, models) arrive.
 
+## OpenAI on a $5 budget, Hindi/English/Hinglish, instant acknowledgments (2026-10-22)
+
+Owner bought a $5 OpenAI key for testing; the brief: cheap models only (never the
+flagship gpt-6-astra/sol/luna family — `Settings` now refuses them unless
+ALLOW_EXPENSIVE_OPENAI_MODELS=true), lowest latency, accuracy first, and agents that
+follow the customer between English, Hindi and Hinglish.
+
+Measured, all with the real prompt/engine (scratch harnesses, not in repo):
+- **LLM** — six scripted calls (English, Hinglish, Hindi; interested / callback /
+  not interested / DNC / language switch): gpt-4.1-nano 3/6 (put an interested
+  Hinglish lead on DO_NOT_CALL, romanized Hindi); gpt-4o-mini and **gpt-4.1-mini**
+  all correct; gpt-4.1-mini also records the qualification → chosen. First phrase
+  ~1.0 s. Fast mode (service_tier priority) measured no faster (0.95 vs 0.99 s
+  median) → off (OPENAI_LLM_SERVICE_TIER).
+- **STT** — gpt-4o-mini-transcribe flipped a Hinglish sentence's meaning ("नहीं
+  बेचते" → "में ही बेचते हैं"); gpt-transcribe correct. Streaming **gpt-live-transcribe**
+  (STT_BACKEND=realtime, languages en+hi, delay low): final text 0.66–0.91 s after
+  the customer stops vs 1.1–2.4 s uploading afterwards, correct in all three
+  languages. $0.017 per streamed minute (~$0.05 per 3-min call).
+- **TTS** — gpt-4o-mini-tts first audio 0.6–1.0 s warm (tts-1 slower); the Indian-
+  accent `instructions` add ~0.03 s. Sent via `extra_body`: the pinned SDK
+  (openai==1.58.1) predates the parameter — upgrading the SDK is a separate decision.
+- **End to end** (browser demo, OpenAI): customer stops → first reply audio
+  2.4–3.3 s (STT ~0.7 + LLM first phrase ~1.0–1.6 + TTS ~0.9). Each step is a network
+  round trip to OpenAI; this is the floor of the STT→LLM→TTS design.
+- **Instant acknowledgments** (`acknowledgments` in the script YAML; pre-recorded,
+  `voice/session/acknowledgments.py`): "Okay." / "जी।" plays **0.02–0.05 s** after the
+  customer stops, the reply follows without overlap; a barge-in stops both. The LLM is
+  told one was already said. Wording is a PLACEHOLDER.
+
+Language: `language_policy: match_customer` + `supported_languages` in the script
+(the earlier single-language behaviour is `fixed` — an earlier client request asked
+for it; confirm with the client). Prompt tells the model to mirror the customer's
+latest message and write Hindi in Devanagari (TTS pronunciation); Hindi `।` ends a
+phrase for streaming; Hindi/Hinglish DNC phrases added (not "abhi call mat karo" —
+that means "not now"); fixed lines (fallbacks, DNC confirmation) have en + hi versions
+chosen by the customer's language (Devanagari in their speech). Caught on the way: an
+acknowledgment hint quoting 'जी' made the model answer an English lead in Hindi —
+removed. Call log "Lead result": Interested / Callback requested / Not interested /
+Do not call / Unclear / No answer (`not_interested_states` in config).
+
+Budget: one 3-minute call ≈ $0.07–0.08 (live STT ~$0.05, TTS ~$0.02, LLM < $0.01) →
+roughly 60 test calls on $5. STT_BACKEND=buffered with gpt-transcribe halves that at
+~+1 s per turn. All of this session's measuring cost roughly $0.15–0.25.
+
 ## Excel call log + first real Vobiz call (2026-10-09)
 
 `exports/call_log.xlsx` (git-ignored — phone numbers) is rebuilt from the database a

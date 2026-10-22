@@ -58,18 +58,53 @@ def _configured(value: object) -> str:
     return text
 
 
+def _language_instruction(script: ScriptConfig) -> str:
+    """The call's language rule, from the script's `language` / `language_policy` /
+    `supported_languages` (config)."""
+    default = _LANGUAGE_NAMES.get(script.language, script.language)
+    if script.language_policy != "match_customer":
+        return (
+            f"Speak only in {default} ({script.language}) for this entire call. Stay in this "
+            "language even if the customer switches to another language or mixes languages "
+            "(e.g. Hindi/English code-switching) — never mirror a language change mid-call."
+        )
+    codes = script.supported_languages or [script.language]
+    names = [_LANGUAGE_NAMES.get(code, code) for code in codes]
+    with_hindi = any(code.split("-")[0] == "hi" for code in codes)
+    with_english = any(code.split("-")[0] == "en" for code in codes)
+    text = (
+        f"Language: start the call in {default}. After that, always reply in the language the customer "
+        f"is speaking in their latest message — you can speak {', '.join(names)}"
+    )
+    if with_hindi and with_english:
+        text += (
+            ", and Hinglish (the Hindi–English mix people in India speak). Look only at the customer's latest "
+            "message: if it is English, reply in English (an Indian name like the customer's is not Hindi). "
+            "Hindi → reply in simple, everyday spoken Hindi. Hinglish → reply in natural Hinglish. "
+            "Switch as soon as they switch, and back again if they switch back; a single English word like "
+            "'Amazon' or 'online' inside a Hindi sentence is still Hindi. Write every Hindi word in Devanagari "
+            "script (बहुत बढ़िया, आप क्या बेचते हैं?) — never romanized Hindi — so it is pronounced correctly; "
+            "keep words that are English (Amazon, online, product, business) in English letters."
+        )
+    else:
+        text += ". Switch as soon as the customer switches."
+    return text + " Never speak any other language."
+
+
 def _static_system_text(script: ScriptConfig, context: ConversationContext) -> str:
     """Everything identical on every turn of a call (and across calls of a campaign)."""
     system_prompt = _load_system_prompt()
     # Language is call-level config (doesn't change turn to turn), so it belongs in
     # this cached static part; the clock and state are in _turn_context_text.
-    language_name = _LANGUAGE_NAMES.get(script.language, script.language)
     parts = [
         system_prompt["role"],
         f"Identity disclosure requirement: {_configured(system_prompt.get('identity_disclosure'))}",
-        f"Speak only in {language_name} ({script.language}) for this entire call. Stay in this "
-        "language even if the customer switches to another language or mixes languages "
-        "(e.g. Hindi/English code-switching) — never mirror a language change mid-call.",
+        _language_instruction(script),
+        *(
+            ["Before each of your replies the customer has already heard a short acknowledgment (such as "
+             "'Okay.'), so start your reply with substance, not with another acknowledgment word."]
+            if script.acknowledgments else []
+        ),
         "Behavior rules:",
         *[f"- {rule}" for rule in system_prompt.get("behavior_rules", [])],
         "",

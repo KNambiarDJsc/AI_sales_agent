@@ -12,13 +12,23 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field
+import re
+
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PROMPTS_DIR = REPO_ROOT / "config" / "prompts"
 SCRIPTS_DIR = REPO_ROOT / "config" / "scripts"
 QUALIFICATION_DIR = REPO_ROOT / "config" / "qualification"
+
+
+# Flagship / premium OpenAI models (per-1M-token prices on the 2026-10 price list run
+# from $1.25 up to $180): never configured by accident. Mini/nano models don't match.
+_EXPENSIVE_MODEL = re.compile(
+    r"(astra|\bsol\b|-sol|terra|luna|-pro\b|-pro-|^o1|^o3(?!-mini)|^gpt-5(\.\d+)?$|^gpt-5(\.\d+)?-(?!mini|nano)|^gpt-4\.1$|^gpt-4o$|^gpt-4(-|$)(?!o|\.1))",
+    re.IGNORECASE,
+)
 
 
 class Settings(BaseSettings):
@@ -43,17 +53,48 @@ class Settings(BaseSettings):
     # (gpt-5.4-nano 0.80s, gpt-4.1-nano 0.87s — all schema-valid 4/4); STT
     # gpt-4o-transcribe 0.94s vs gpt-4o-mini-transcribe 0.82s; TTS first audio
     # gpt-4o-mini-tts 0.80s vs tts-1 1.43s. Re-measure before changing.
-    openai_stt_model: str = "gpt-4o-mini-transcribe"
+    #
+    # 2026-10-22 re-measure for English/Hindi/Hinglish calls on a $5 budget (prices per
+    # 1M tokens in/out). Six scripted calls through the real engine: gpt-4.1-nano
+    # ($0.10/$0.40) 3/6 — put an interested Hinglish lead on DO_NOT_CALL and replied in
+    # romanized Hinglish; gpt-4o-mini ($0.15/$0.60) and gpt-4.1-mini ($0.40/$1.60)
+    # all correct, Hindi in Devanagari; gpt-4.1-mini also recorded the qualification.
+    # First phrase ~1.0 s for all three. gpt-5-nano misread Hinglish. Per 3-minute
+    # call the LLM is < $0.01 — STT/TTS dominate. Never configure the expensive
+    # flagship models (gpt-6-astra $10/$50, gpt-6-sol, gpt-5.x-sol/terra, ...).
+    # STT: on a Hinglish line gpt-4o-mini-transcribe flipped the meaning ("नहीं
+    # बेचते" → "में ही बेचते हैं"); gpt-transcribe ($0.0045/min) got it right.
+    openai_stt_model: str = "gpt-transcribe"
     openai_tts_model: str = "gpt-4o-mini-tts"
     openai_tts_voice: str = "alloy"
+    # gpt-4o-mini-tts speaking style. An Indian accent sounds natural to the leads and
+    # handles the Hindi/Hinglish replies (language_policy: match_customer).
+    openai_tts_instructions: str = (
+        "Speak like a warm, friendly Indian sales caller on the phone: natural Indian English accent, "
+        "conversational pace. When the text is Hindi, speak natural, fluent Hindi."
+    )
     openai_llm_model: str = "gpt-4.1-mini"
+    # Budget guard (see _refuse_expensive_models): a key funded for testing was emptied
+    # once by a flagship model. Set true only on purpose.
+    allow_expensive_openai_models: bool = False
     # Only for reasoning models (gpt-5.x): "none"/"minimal" keeps them fast. Leave
     # empty for gpt-4.x, which reject the parameter.
     openai_llm_reasoning_effort: str = ""
-    # ISO-639-1 language the customer is transcribed in. Pinning it stops STT from
-    # "detecting" another language on noise or accents (and the LLM then answering in
-    # that language). Empty = auto-detect.
-    stt_language: str = "en"
+    # "" = standard processing; "priority" = OpenAI Fast mode (faster, ~1.75x token
+    # price — gpt-4.1-mini $0.70/$2.80 per 1M; still < $0.02 per call).
+    openai_llm_service_tier: str = ""
+    # STT language. Empty = auto-detect, needed for English/Hindi/Hinglish calls (both
+    # transcribe models still wrote Hindi correctly when pinned to "en", but pinning is
+    # wrong for a Hindi caller). Set e.g. "en" only for fixed-language campaigns.
+    stt_language: str = ""
+    # Hints for the transcriber: expected languages (live model) and the setting —
+    # context measurably helps code-switched speech.
+    stt_languages: str = "en,hi"
+    stt_prompt: str = "A sales phone call in India. The customer may speak English, Hindi or Hinglish (a mix of both)."
+    # Streaming ("realtime") STT model and its latency/accuracy trade-off
+    # (minimal|low|medium|high|xhigh — OpenAI realtime-transcription guide).
+    openai_realtime_stt_model: str = "gpt-live-transcribe"
+    stt_realtime_delay: str = "low"
 
     # --- AI backend: OpenAI, or local models on this machine ---
     # "auto": OpenAI when its key works; each component (STT/LLM/TTS) falls back to
@@ -178,6 +219,23 @@ class Settings(BaseSettings):
     # every call attempt.
     call_log_skip_providers: str = "browser_demo,fake"
     call_log_skip_campaigns: str = r"(?i)simulation|-test$|-sim$|^llm-eval$"
+
+    @model_validator(mode="after")
+    def _refuse_expensive_models(self) -> "Settings":
+        """Refuse to start with a flagship OpenAI model configured unless
+        ALLOW_EXPENSIVE_OPENAI_MODELS=true. A phone call sends the model a ~2,000-token
+        prompt every few seconds; at gpt-6-astra's $10/$50 per 1M tokens that is ~100x
+        gpt-4.1-nano and empties a small test budget in a few calls."""
+        if self.allow_expensive_openai_models:
+            return self
+        for field in ("openai_llm_model", "openai_stt_model", "openai_tts_model", "openai_realtime_stt_model"):
+            model = getattr(self, field) or ""
+            if _EXPENSIVE_MODEL.search(model):
+                raise ValueError(
+                    f"{field.upper()}={model!r} is an expensive flagship model. Use a mini/nano model "
+                    "(e.g. gpt-4.1-nano), or set ALLOW_EXPENSIVE_OPENAI_MODELS=true deliberately."
+                )
+        return self
 
     @property
     def effective_public_base_url(self) -> str:

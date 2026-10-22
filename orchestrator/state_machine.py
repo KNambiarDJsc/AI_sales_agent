@@ -21,6 +21,7 @@ from config.settings import SCRIPTS_DIR
 # transitions_on — DNC and a hard end must never be a dead end the script forgot to
 # wire up (Section 10: DNC enforcement is not optional/LLM-controlled).
 GLOBAL_SAFETY_STATES = {"DO_NOT_CALL", "END"}
+_DEVANAGARI = re.compile(r"[\u0900-\u097F]")
 
 
 class _SafeFormatDict(dict):
@@ -49,7 +50,8 @@ class StateConfig(BaseModel):
     objective: str = ""
     mandatory_questions: list[str] = Field(default_factory=list)
     allowed_tools: list[str] = Field(default_factory=list)
-    fallback_response: str = ""
+    # One line, or one per language ({"en": ..., "hi": ...}) — see ScriptConfig.fallback_for.
+    fallback_response: str | dict[str, str] = ""
     # Scripted line spoken without an LLM round trip (used for the call's first words,
     # where a model call only adds 1-2s of dead air before the greeting plays). See
     # ScriptConfig.opening_line_for. Only meaningful on the script's starting state.
@@ -61,12 +63,16 @@ class ScriptConfig(BaseModel):
     script_id: str
     version: int
     language: str = "en"
+    language_policy: str = "fixed"  # fixed | match_customer — see config/scripts/product-a.yaml
+    supported_languages: list[str] = Field(default_factory=list)
     states: dict[str, StateConfig]
     max_call_duration_seconds: int = 420
     retry_limits: dict[str, int] = Field(default_factory=lambda: {"per_question": 2, "per_state": 3})
     qualification_ref: str | None = None
     dnc_phrases: list[str] = Field(default_factory=list)
     sales_followup_states: list[str] = Field(default_factory=list)
+    not_interested_states: list[str] = Field(default_factory=list)
+    acknowledgments: dict[str, list[str]] = Field(default_factory=dict)
 
     def is_dnc_request(self, customer_text: str) -> bool:
         """Deterministic DNC detection from the script's configured phrases — see
@@ -111,9 +117,15 @@ class ScriptConfig(BaseModel):
             return ""
         return substitute_placeholders(text, fields)
 
-    def fallback_for(self, state_name: str, fields: dict | None = None) -> str:
+    def fallback_for(self, state_name: str, fields: dict | None = None, language: str | None = None) -> str:
+        """The state's configured fallback line, in `language` (base code, e.g. "hi")
+        when the config has one per language; otherwise the script's default
+        language, otherwise whichever is configured."""
         state = self.states.get(state_name)
         text = state.fallback_response if state else "Sorry, could you repeat that?"
+        if isinstance(text, dict):
+            default = self.language.split("-")[0]
+            text = text.get(language or default) or text.get(default) or next(iter(text.values()), "")
         return substitute_placeholders(text, fields or {})
 
 
@@ -125,12 +137,16 @@ def load_script(path: str | Path) -> ScriptConfig:
         script_id=raw["script_id"],
         version=raw["version"],
         language=raw.get("language", "en"),
+        language_policy=raw.get("language_policy", "fixed"),
+        supported_languages=raw.get("supported_languages") or [],
         states={name: StateConfig(**cfg) for name, cfg in raw["states"].items()},
         max_call_duration_seconds=raw.get("max_call_duration_seconds", 420),
         retry_limits=raw.get("retry_limits", {"per_question": 2, "per_state": 3}),
         qualification_ref=raw.get("qualification_ref"),
         dnc_phrases=raw.get("dnc_phrases") or [],
         sales_followup_states=raw.get("sales_followup_states") or [],
+        not_interested_states=raw.get("not_interested_states") or [],
+        acknowledgments=raw.get("acknowledgments") or {},
     )
 
 
@@ -150,6 +166,7 @@ class StateMachine:
         self.script = script
         self.current_state = current_state
         self._state_retry_counts: dict[str, int] = {}
+        self.customer_language: str | None = None  # see note_customer_text
 
     def is_transition_allowed(self, to_state: str) -> bool:
         return to_state in self.script.allowed_next_states(self.current_state)
@@ -168,7 +185,16 @@ class StateMachine:
         return labels + [x for x in ("asked_not_to_be_called", "said_goodbye", "other") if x not in labels]
 
     def fallback_response(self, fields: dict | None = None) -> str:
-        return self.script.fallback_for(self.current_state, fields)
+        return self.script.fallback_for(self.current_state, fields, self.customer_language)
+
+    def note_customer_text(self, text: str) -> None:
+        """Track the language the customer is speaking, so the application's own
+        fixed lines (fallbacks, the DNC backstop) match it. Only with
+        language_policy match_customer: STT writes Hindi and Hinglish speech in
+        Devanagari, so Devanagari means Hindi; otherwise the script's default."""
+        if self.script.language_policy != "match_customer" or not text.strip():
+            return
+        self.customer_language = "hi" if _DEVANAGARI.search(text) else self.script.language.split("-")[0]
 
     def opening_line(self, fields: dict | None = None) -> str | None:
         """The current state's scripted opening, or None if there is none or a lead

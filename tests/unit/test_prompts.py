@@ -35,11 +35,22 @@ def test_system_message_instructs_a_single_consistent_language():
     # switches to mid-call (common in India, where customers code-switch between
     # Hindi and English) - product-a.yaml declares language: en-IN, but nothing ever
     # told the model that before this fix.
-    script = load_script_by_id("product-a")
+    script = load_script_by_id("product-a").model_copy(update={"language_policy": "fixed"})
     context = _context()
     message = build_system_message(script, context)
     assert "Speak only in English (India) (en-IN)" in message.content
     assert "even if the customer switches to another language" in message.content
+
+
+def test_match_customer_policy_follows_the_customers_language_from_config():
+    # product-a.yaml: language_policy match_customer, supported en-IN + hi-IN — start in
+    # English, then mirror English / Hindi / Hinglish; Hindi in Devanagari for the TTS.
+    script = load_script_by_id("product-a")
+    assert script.language_policy == "match_customer"
+    message = build_system_message(script, _context()).content
+    assert "start the call in English (India)" in message
+    assert "Hinglish" in message and "Devanagari" in message
+    assert "Speak only in" not in message
 
 
 def test_system_message_lists_valid_next_states_explicitly():

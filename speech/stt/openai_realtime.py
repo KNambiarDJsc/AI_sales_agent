@@ -55,6 +55,25 @@ REALTIME_STT_SAMPLE_RATE_HZ = 24000  # confirmed hard floor, not a preference
 FINAL_TRANSCRIPT_TIMEOUT_SECONDS = 10.0
 
 
+def _transcription_config(model: str, language: str) -> dict:
+    """`audio.input.transcription` for the session (OpenAI realtime-transcription
+    guide): gpt-live-transcribe takes a `languages` list (it rejects the singular
+    `language`), a `prompt` and a `delay`; the other models take `language`."""
+    settings = get_settings()
+    config: dict = {"model": model}
+    if settings.stt_prompt:
+        config["prompt"] = settings.stt_prompt
+    if model.startswith("gpt-live"):
+        languages = [code.strip() for code in settings.stt_languages.split(",") if code.strip()]
+        if languages:
+            config["languages"] = languages
+        if settings.stt_realtime_delay:
+            config["delay"] = settings.stt_realtime_delay
+    elif language:
+        config["language"] = language
+    return config
+
+
 class OpenAIRealtimeSTTStream(STTStream):
     def __init__(self, api_key: str, model: str, language: str = ""):
         self._api_key = api_key
@@ -83,7 +102,7 @@ class OpenAIRealtimeSTTStream(STTStream):
                         "audio": {
                             "input": {
                                 "format": {"type": "audio/pcm", "rate": REALTIME_STT_SAMPLE_RATE_HZ},
-                                "transcription": {"model": self._model, **({"language": self._language} if self._language else {})},
+                                "transcription": _transcription_config(self._model, self._language),
                                 "turn_detection": None,
                             }
                         },
@@ -159,11 +178,12 @@ class OpenAIRealtimeSTTStream(STTStream):
 
 class OpenAIRealtimeSTTProvider(STTProvider):
     input_sample_rate_hz = REALTIME_STT_SAMPLE_RATE_HZ
+    backend = "openai"
 
     def __init__(self) -> None:
         settings = get_settings()
         self._api_key = settings.openai_api_key
-        self._model = settings.openai_stt_model
+        self._model = settings.openai_realtime_stt_model
         self._language = settings.stt_language
 
     async def start_stream(self) -> STTStream:

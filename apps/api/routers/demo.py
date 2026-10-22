@@ -60,6 +60,8 @@ from orchestrator.state_machine import StateMachine, load_script_by_id
 from services.call_worker.lifecycle import finalize_call
 from speech.stt.factory import get_stt_provider
 from speech.tts.factory import get_tts_provider
+from voice.audio.processing import ResampleState, resample_pcm16
+from voice.session import acknowledgments
 from voice.session.speech_pipeline import synthesize_phrases
 
 logger = logging.getLogger(__name__)
@@ -71,7 +73,8 @@ DEMO_SCRIPT_ID = "product-a"
 
 # Server-side backstop for accidental clicks (the page filters them first): less than
 # 0.3 s of 16 kHz PCM16 can't hold a real utterance.
-MIN_UTTERANCE_BYTES = int(0.3 * 16000 * 2)
+CAPTURE_RATE_HZ = 16000  # the page's AudioWorklet capture rate (CAPTURE_RATE in the JS below)
+MIN_UTTERANCE_BYTES = int(0.3 * CAPTURE_RATE_HZ * 2)
 
 
 async def _get_or_create_demo_campaign(session) -> tuple[Tenant, Campaign]:
@@ -131,6 +134,8 @@ async def demo_ws(websocket: WebSocket) -> None:
     settings = get_settings()
     tts_provider = get_tts_provider()
     stt_provider = get_stt_provider()
+    stt_rate = getattr(stt_provider, "input_sample_rate_hz", CAPTURE_RATE_HZ)
+    stt_resample = ResampleState()
     llm_provider = get_llm_provider()
 
     async with session_scope() as session:
@@ -324,6 +329,21 @@ async def demo_ws(websocket: WebSocket) -> None:
                 logger.exception("demo_turn_failed", extra={"turn": 0})
                 await send_json({"type": "error", "text": "The agent couldn't start: " + _problem_text(exc)})
 
+    async def acknowledge() -> None:
+        """Play a pre-recorded acknowledgment right away (voice/session/acknowledgments.py)
+        — only once it's recorded; never synthesized here."""
+        text = engine.acknowledgment()
+        pcm = acknowledgments.cached(tts_provider, text) if text else None
+        if pcm is None:
+            if text:
+                spawn(acknowledgments.prerecord(tts_provider, engine.all_acknowledgments()))
+            return
+        await send_json({"type": "audio_start", "sample_rate": tts_provider.sample_rate_hz})
+        for i in range(0, len(pcm), 9600):
+            with contextlib.suppress(WebSocketDisconnect, RuntimeError):
+                await websocket.send_bytes(pcm[i : i + 9600])
+        await send_json({"type": "audio_end"})
+
     def spawn(coro) -> None:
         task = asyncio.create_task(coro)
         turn_tasks.add(task)
@@ -333,6 +353,12 @@ async def demo_ws(websocket: WebSocket) -> None:
         await send_json({"type": "info", "text": "Connected — the agent will greet you now."})
         spawn(opening_line())
 
+        async def prerecord_later() -> None:
+            await asyncio.sleep(1.5)  # let the greeting's audio go first
+            await acknowledgments.prerecord(tts_provider, engine.all_acknowledgments())
+
+        spawn(prerecord_later())
+
         while True:
             message = await websocket.receive()
             if message["type"] == "websocket.disconnect":
@@ -340,7 +366,10 @@ async def demo_ws(websocket: WebSocket) -> None:
             if message.get("bytes") is not None:
                 if recording is not None:
                     stream, received = recording
-                    await stream.send_audio(message["bytes"])
+                    chunk = message["bytes"]
+                    if stt_rate != CAPTURE_RATE_HZ:  # streaming STT takes 24 kHz
+                        chunk = resample_pcm16(chunk, CAPTURE_RATE_HZ, stt_rate, stt_resample)
+                    await stream.send_audio(chunk)
                     recording = (stream, received + len(message["bytes"]))
                 continue
             if not message.get("text"):
@@ -355,6 +384,7 @@ async def demo_ws(websocket: WebSocket) -> None:
                 if recording is not None:  # a previous press never ended — discard it
                     with contextlib.suppress(Exception):
                         await recording[0].close()
+                stt_resample = ResampleState()
                 recording = (await stt_provider.start_stream(), 0)
             elif kind in ("utterance_end", "utterance_cancel"):
                 if recording is None:
@@ -370,6 +400,7 @@ async def demo_ws(websocket: WebSocket) -> None:
                 received_at = loop.time()
                 await interrupt()  # mutes every older turn...
                 latest_turn += 1  # ...then this one gets an id above the muted range
+                await acknowledge()  # instant "Okay." / "जी।" while the reply is prepared
                 spawn(handle_utterance(latest_turn, stream, received_at))
             elif kind == "barge_in":
                 await interrupt()

@@ -122,7 +122,7 @@ class PhraseSplitter:
     sentence end) so audio starts early; later phrases end at a sentence end, or at a
     comma once they're long enough to sound natural on their own."""
 
-    _SENTENCE_END = re.compile(r"[.!?…](?=\s)")
+    _SENTENCE_END = re.compile(r"[.!?…।](?=\s)")  # । = Hindi full stop (danda)
     _CLAUSE_END = re.compile(r"[,;:—–](?=\s)")
 
     def __init__(self, first_min_words: int = 3, min_words: int = 6):
@@ -151,7 +151,8 @@ class PhraseSplitter:
                 self._emitted += 1
         return phrases
 
-    _PAUSE_WORDS = {"and", "but", "or", "so", "because", "to", "on", "for", "with", "about", "if", "when", "while", "that"}
+    _PAUSE_WORDS = {"and", "but", "or", "so", "because", "to", "on", "for", "with", "about", "if", "when", "while", "that",
+                    "और", "लेकिन", "पर", "क्योंकि", "तो", "कि", "जब", "अगर"}  # Hindi: and, but, but, because, so, that, when, if
     _FIRST_PHRASE_SOFT_LIMIT = 8  # words, for an opening sentence with no comma yet
 
     def _find_cut(self, rest: str) -> int | None:

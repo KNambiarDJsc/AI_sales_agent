@@ -44,6 +44,9 @@ async def transcribe_pcm16_openai(
     audio_file = io.BytesIO(_pcm16_to_wav_bytes(pcm16))
     audio_file.name = "turn.wav"
     extra = {"language": language} if language else {}
+    prompt = get_settings().stt_prompt
+    if prompt:
+        extra["prompt"] = prompt  # context: helps code-switched (Hinglish) speech
     response = await (client or get_openai_client()).audio.transcriptions.create(
         model=model, file=audio_file, response_format="json", **extra
     )

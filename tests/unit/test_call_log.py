@@ -14,9 +14,11 @@ def _attempt(outcome=None, status="completed"):
 def test_agreed_comes_from_the_state_path_not_from_the_llm():
     followup = {"INTERESTED"}
     path = ["INTRO", "PERMISSION", "DISCOVERY", "QUALIFICATION", "INTERESTED", "END"]
-    assert _agreed(_attempt(), path, followup, None, None) == "Yes"
-    assert _agreed(_attempt(), ["INTRO", "PERMISSION", "NOT_INTERESTED", "END"], followup, None, None) == "No"
-    assert _agreed(_attempt(), ["INTRO", "UNCERTAIN"], followup, SimpleNamespace(sales_followup_required=True), None) == "Yes"
+    declined = {"NOT_INTERESTED"}
+    assert _agreed(_attempt(), path, followup, None, None, declined) == "Interested"
+    assert _agreed(_attempt(), ["INTRO", "PERMISSION", "NOT_INTERESTED", "END"], followup, None, None, declined) == "Not interested"
+    assert _agreed(_attempt(), ["INTRO", "PERMISSION", "UNCERTAIN", "END"], followup, None, None, declined) == "Unclear"
+    assert _agreed(_attempt(), ["INTRO", "UNCERTAIN"], followup, SimpleNamespace(sales_followup_required=True), None) == "Interested"
     assert _agreed(_attempt(), ["INTRO", "CALLBACK"], followup, None, object()) == "Callback requested"
     assert _agreed(_attempt(outcome="do_not_call"), path, followup, None, None) == "Do not call"  # DNC always wins
     assert _agreed(_attempt(status="no_answer"), [], followup, None, None) == "No answer"
@@ -45,11 +47,11 @@ def _row(agreed, name="Naman"):
 
 def test_workbook_has_every_call_and_a_sheet_of_the_yeses(tmp_path):
     path = tmp_path / "call_log.xlsx"
-    write_workbook([_row("Yes", "Naman"), _row("No", "Other")], path)
+    write_workbook([_row("Interested", "Naman"), _row("Not interested", "Other")], path)
     wb = load_workbook(path)
-    assert wb.sheetnames == ["Calls", "Agreed to sales team"]
+    assert wb.sheetnames == ["Calls", "Interested leads"]
     calls = list(wb["Calls"].iter_rows(values_only=True))
-    assert calls[0][:5] == ("Call time", "Name", "Business", "Phone", "Agreed to sales team?")
+    assert calls[0][:5] == ("Call time", "Name", "Business", "Phone", "Lead result")
     assert [r[1] for r in calls[1:]] == ["Other", "Naman"]  # newest first
-    yes = list(wb["Agreed to sales team"].iter_rows(values_only=True))
+    yes = list(wb["Interested leads"].iter_rows(values_only=True))
     assert len(yes) == 2 and yes[1][1] == "Naman" and yes[1][4] == "Yes please call me"

@@ -14,6 +14,7 @@ class OpenAILLMProvider(LLMProvider):
         settings = get_settings()
         self._model = settings.openai_llm_model
         self._reasoning_effort = settings.openai_llm_reasoning_effort
+        self._service_tier = settings.openai_llm_service_tier
 
     def _request_kwargs(self, messages: list[LLMMessage], schema_name: str, json_schema: dict) -> dict:
         kwargs = {
@@ -26,6 +27,10 @@ class OpenAILLMProvider(LLMProvider):
         }
         if self._reasoning_effort:
             kwargs["reasoning_effort"] = self._reasoning_effort
+        if self._service_tier:
+            # OpenAI "Fast mode" (service_tier priority/fast). Via extra_body: the pinned
+            # SDK (openai==1.58.1) only knows the older tier values.
+            kwargs["extra_body"] = {"service_tier": self._service_tier}
         return kwargs
 
     async def propose(

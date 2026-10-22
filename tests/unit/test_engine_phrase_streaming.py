@@ -50,6 +50,16 @@ def test_long_opening_without_punctuation_is_released_at_a_pause_word():
     assert sp.feed("We can help you get your products listed on Amazon.", final=True) == ["on Amazon."]
 
 
+def test_hindi_sentences_are_released_at_the_danda():
+    # Hindi ends sentences with "।", not "." — without it a Hindi reply waited until it
+    # was completely written before any of it could be spoken.
+    sp = PhraseSplitter()
+    assert sp.feed("बहुत बढ़िया। आप Amazon पर कौन से", final=False) == ["बहुत बढ़िया।"]
+    assert sp.feed("बहुत बढ़िया। आप Amazon पर कौन से products बेचना चाहते हैं?", final=True) == [
+        "आप Amazon पर कौन से products बेचना चाहते हैं?"
+    ]
+
+
 def test_phrase_splitter_never_loses_or_reorders_words():
     text = "Thanks, that helps a lot. We work with sellers like you, every day, across India. Shall I continue?"
     sp = PhraseSplitter()
