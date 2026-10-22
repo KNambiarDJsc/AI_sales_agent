@@ -16,11 +16,14 @@ barge-in behavior we want (Section 18): all pipelined sentences stop together.
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator
 
 from config.settings import get_settings
 from llm.openai_client import get_openai_client
 from speech.tts.base import TTSProvider
+
+logger = logging.getLogger(__name__)
 
 OPENAI_TTS_SAMPLE_RATE_HZ = 24000
 
@@ -42,6 +45,8 @@ class OpenAITTSProvider(TTSProvider):
     async def synthesize_stream(self, text: str) -> AsyncIterator[bytes]:
         cancel_event = asyncio.Event()
         self._active_cancel_events.add(cancel_event)
+        started = asyncio.get_running_loop().time()
+        first = True
         try:
             async with get_openai_client().audio.speech.with_streaming_response.create(
                 model=self._model,
@@ -57,6 +62,10 @@ class OpenAITTSProvider(TTSProvider):
                     if cancel_event.is_set():
                         break
                     if chunk:
+                        if first:
+                            first = False
+                            logger.info("tts_first_audio", extra={"seconds": round(asyncio.get_running_loop().time() - started, 3),
+                                                                  "chars": len(text)})
                         yield chunk
         finally:
             self._active_cancel_events.discard(cancel_event)

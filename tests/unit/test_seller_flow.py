@@ -87,8 +87,10 @@ def test_prompt_carries_verified_knowledge_but_never_placeholders():
 def test_reply_language_hint_follows_the_latest_line():
     s = _script()
     assert "in Hindi/Hinglish" in _reply_language_hint(s, "हाँ, इंटरेस्ट है")
-    latin = _reply_language_hint(s, "Mostly customers returned used products.")
-    assert "reply in English" in latin and "Hinglish" in latin
+    assert "reply in English" in _reply_language_hint(s, "Mostly customers returned used products.")
+    assert "reply in English" in _reply_language_hint(s, "No, I'm not sure.")  # was answered in Hinglish
+    assert "reply in Hinglish" in _reply_language_hint(s, "Achha, ismein kya karna padega?")
+    assert "reply in Hinglish" in _reply_language_hint(s, "Haan bolo")
     assert _reply_language_hint(s.model_copy(update={"language_policy": "fixed"}), "हाँ") == ""
 
 

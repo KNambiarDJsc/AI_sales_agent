@@ -166,7 +166,7 @@ def test_outbound_audio_and_barge_in_use_the_documented_messages(settings):
     assert sent[0] == {
         "event": "playAudio",
         "streamId": "stream-1",
-        "media": {"contentType": "audio/x-l16", "sampleRate": 8000, "payload": base64.b64encode(b"\x01\x00\x02\x00").decode()},
+        "media": {"contentType": "audio/x-l16", "sampleRate": 24000, "payload": base64.b64encode(b"\x01\x00\x02\x00").decode()},
     }
     assert sent[1] == {"event": "clearAudio", "streamId": "stream-1"}
     provider.unregister_stream("call-1")

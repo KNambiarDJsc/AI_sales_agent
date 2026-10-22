@@ -39,7 +39,6 @@ from voice.audio.processing import (
     outbound_frame_bytes,
     resample_pcm16,
     tts_pcm16_to_telephony_frame,
-    tts_pcm16_to_telephony_pcm16,
 )
 from voice.session.sentence_split import split_into_speech_chunks
 from voice.session import acknowledgments
@@ -90,7 +89,9 @@ class VoiceSession:
         self._pending_pcm16 = bytearray()  # accumulates until we have a full VAD frame
 
         self._stt_provider = stt_provider
-        self._stt_stream = None  # created lazily in `start()`
+        self._stt_stream = None  # connected in the background by `start()`
+        self._stt_connect: asyncio.Task | None = None
+        self._stt_backlog = bytearray()  # audio heard before the STT stream was connected
         self._consecutive_empty_turns = 0
         # STT gets its own independent resample chain at whatever rate the provider
         # declares (e.g. OpenAIRealtimeSTTProvider requires >=24kHz, the VAD stays at
@@ -110,9 +111,17 @@ class VoiceSession:
         self._last_activity = 0.0  # loop time of the last speech from either side; see _watch_call
         self._started_at = 0.0  # loop time the call connected; see _watch_call
         self._wrapping_up = False  # time limit reached: saying goodbye, no more turns
+        # Ended turns waiting for a reply, in order: (transcript task, talked_over).
+        # Handled by _process_turns, never inline in handle_inbound_audio — awaiting a
+        # whole LLM turn there stopped the call from listening (live Vobiz call: the
+        # agent "got stuck" after the customer spoke, then audio arrived in a burst).
+        self._turns: asyncio.Queue = asyncio.Queue()
+        self._turn_worker: asyncio.Task | None = None
 
     async def start(self) -> None:
-        self._stt_stream = await self._stt_provider.start_stream()
+        # Not awaited: the greeting starts while the STT socket connects (~0.5 s that
+        # used to be silence after pickup); audio heard meanwhile waits in _stt_backlog.
+        self._stt_connect = asyncio.create_task(self._stt_provider.start_stream())
         self._background.add(warm := asyncio.create_task(self._engine.warm_up()))
         warm.add_done_callback(self._background.discard)
         self._last_activity = self._started_at = asyncio.get_event_loop().time()
@@ -159,7 +168,7 @@ class VoiceSession:
         """Called by the WebSocket handler for every inbound media frame from the
         telephony provider, already in that provider's own encoding (mu-law 8kHz for
         Twilio, raw PCM16 8kHz for Exotel — see `TelephonyProvider.audio_encoding`)."""
-        if self._ended or self._stt_stream is None:
+        if self._ended or (self._stt_stream is None and self._stt_connect is None):
             return
 
         pcm16_native = mulaw_to_pcm16(audio_chunk) if self._audio_encoding == "mulaw" else audio_chunk
@@ -168,7 +177,11 @@ class VoiceSession:
         # not gated on VAD-frame chunking below, since the STT stream just needs a
         # correctly-ordered byte stream, not 20ms-aligned frames.
         stt_frame = resample_pcm16(pcm16_native, TELEPHONY_SAMPLE_RATE_HZ, self._stt_input_rate_hz, self._resample_stt)
-        await self._stt_stream.send_audio(stt_frame)
+        if self._stt_stream is None and not self._stt_connect.done():
+            self._stt_backlog.extend(stt_frame)
+            del self._stt_backlog[: max(0, len(self._stt_backlog) - self._stt_input_rate_hz * 2 * 5)]  # last 5 s
+        else:
+            await (await self._stt()).send_audio(stt_frame)
 
         pcm16_16k = resample_pcm16(pcm16_native, TELEPHONY_SAMPLE_RATE_HZ, VAD_SAMPLE_RATE_HZ, self._resample_in)
         self._pending_pcm16.extend(pcm16_16k)
@@ -265,22 +278,69 @@ class VoiceSession:
                     await self._handle_barge_in()
 
         if event in (TurnEvent.TURN_ENDED, TurnEvent.MAX_TURN_REACHED):
-            if self._agent_speaking() and not self._barged_in_this_utterance:
-                # Short speech while the agent kept talking: backchannel ("haan",
-                # "okay") or noise. Take its transcript out of the STT stream so it
-                # isn't glued onto the next real turn, and don't reply to it — a reply
-                # queued behind the current one is what sounded like several agents.
-                await self._discard_turn()
-            else:
-                await self._on_turn_ended()
+            # Short speech while the agent kept talking is usually a backchannel
+            # ("haan", "okay") — but can be a real "no". Decided once it's transcribed.
+            self._queue_turn(talked_over=self._agent_speaking() and not self._barged_in_this_utterance)
 
-    async def _discard_turn(self) -> None:
+    def _queue_turn(self, talked_over: bool) -> None:
+        # The transcript request starts *now*, so it covers exactly this utterance
+        # (the realtime STT commits its buffer on the request), even if an earlier
+        # turn is still being answered.
+        transcript = asyncio.ensure_future(self._receive_final())
+        self._turns.put_nowait((transcript, talked_over))
+        if self._turn_worker is None or self._turn_worker.done():
+            self._turn_worker = asyncio.create_task(self._process_turns())
+
+    async def _receive_final(self):
+        loop = asyncio.get_event_loop()
+        stt_start = loop.time()
         try:
-            result = await asyncio.wait_for(self._stt_stream.receive_final(), timeout=self._settings.stt_timeout_seconds)
-        except Exception:  # noqa: BLE001
-            result = None
-        logger.info("backchannel_ignored", extra={"call_id": self._identity.provider_call_id,
-                                                  "text": (result.text if result else "")[:60]})
+            stream = await self._stt()
+            return await asyncio.wait_for(stream.receive_final(), timeout=self._settings.stt_timeout_seconds)
+        except asyncio.TimeoutError:
+            logger.warning("stt_timeout", extra={"call_id": self._identity.provider_call_id})
+            return None
+        except Exception:  # noqa: BLE001 - an STT failure must not kill the call
+            logger.exception("stt_call_failed")
+            return None
+        finally:
+            logger.info("turn_timing_stt_final", extra={"seconds": round(loop.time() - stt_start, 3)})
+
+    async def _stt(self):
+        """The connected STT stream, with any audio heard before it connected sent
+        first. Raises if connecting failed."""
+        if self._stt_stream is None:
+            stream = await self._stt_connect
+            if self._stt_stream is None:
+                self._stt_stream = stream
+                backlog, self._stt_backlog = bytes(self._stt_backlog), bytearray()
+                if backlog:
+                    await stream.send_audio(backlog)
+        return self._stt_stream
+
+    async def _process_turns(self) -> None:
+        while not self._ended:
+            transcript_task, talked_over = await self._turns.get()
+            try:
+                transcript = await transcript_task
+                text = transcript.text if transcript else ""
+                if talked_over and (not text.strip() or acknowledgments.is_backchannel(text)):
+                    # Don't reply to it — a reply queued behind the current one is
+                    # what sounded like several agents.
+                    logger.info("backchannel_ignored", extra={"call_id": self._identity.provider_call_id,
+                                                              "text": text[:60]})
+                    continue
+                await self._on_turn_ended(text)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - one failed turn must not end the conversation
+                logger.exception("turn_failed", extra={"call_id": self._identity.provider_call_id})
+            finally:
+                self._turns.task_done()
+
+    async def _turns_done(self) -> None:
+        """Wait until every ended turn so far has been handled (tests)."""
+        await self._turns.join()
 
     async def _handle_barge_in(self) -> None:
         """Section 18: stop TTS, clear the provider's buffered audio, cancel the
@@ -318,25 +378,7 @@ class VoiceSession:
         self._first_frame_sent_at = None
         self._speaking_task = asyncio.create_task(self._play(_once(pcm)))
 
-    async def _on_turn_ended(self) -> None:
-        # Timing instrumentation (not guessing where per-turn latency goes): logs how
-        # long the STT-final wait itself took, separate from the LLM/TTS time logged
-        # in _run_agent_turn/_speak — added live while chasing a reported 4-5s gap.
-        loop = asyncio.get_event_loop()
-        stt_start = loop.time()
-        try:
-            transcript = await asyncio.wait_for(
-                self._stt_stream.receive_final(), timeout=self._settings.stt_timeout_seconds
-            )
-        except asyncio.TimeoutError:
-            logger.warning("stt_timeout", extra={"call_id": self._identity.provider_call_id})
-            transcript = None
-        except Exception:  # noqa: BLE001 - an STT failure must not kill the call
-            logger.exception("stt_call_failed")
-            transcript = None
-        logger.info("turn_timing_stt_final", extra={"seconds": round(loop.time() - stt_start, 3)})
-
-        customer_text = transcript.text if transcript else ""
+    async def _on_turn_ended(self, customer_text: str) -> None:
         if not customer_text.strip():
             await self._handle_empty_turn()
             return
@@ -365,7 +407,9 @@ class VoiceSession:
 
     def _start_speaking(self, text: str) -> None:
         self._first_frame_sent_at = None  # reset; _speak() sets this once real audio goes out
-        self._speaking_task = asyncio.create_task(self._after(self._speaking_task, self._speak(text)))
+        recorded = acknowledgments.cached(self._tts_provider, text)  # e.g. the greeting (voice/session/opening.py)
+        speech = self._play(_once(recorded)) if recorded is not None else self._speak(text)
+        self._speaking_task = asyncio.create_task(self._after(self._speaking_task, speech))
 
     def _start_speaking_phrases(self, phrases: AsyncIterator[str]) -> None:
         self._first_frame_sent_at = None
@@ -445,6 +489,9 @@ class VoiceSession:
         """Sends TTS-rate PCM16 `audio` down the call, converted to the telephony
         encoding and paced in real time."""
         bytes_per_sample = 1 if self._audio_encoding == "mulaw" else 2
+        out_rate = TELEPHONY_SAMPLE_RATE_HZ
+        if self._audio_encoding == "pcm16":
+            out_rate = getattr(self._telephony, "outbound_sample_rate_hz", TELEPHONY_SAMPLE_RATE_HZ)
         loop = asyncio.get_event_loop()
         next_send_time = loop.time()
         speak_start = next_send_time
@@ -466,19 +513,18 @@ class VoiceSession:
                 first_frame_logged = True
                 self._first_frame_sent_at = loop.time()
                 logger.info("turn_timing_tts_first_frame", extra={"seconds": round(loop.time() - speak_start, 3)})
-            duration_s = (len(frame) / bytes_per_sample) / TELEPHONY_SAMPLE_RATE_HZ
+            duration_s = (len(frame) / bytes_per_sample) / out_rate
             next_send_time = send_time + duration_s
 
         try:
-            frame_chunker = FrameChunker(
-                frame_bytes=outbound_frame_bytes(self._settings.outbound_frame_ms, bytes_per_sample=bytes_per_sample)
-            )
+            frame_ms = getattr(self._telephony, "outbound_frame_ms", None) or self._settings.outbound_frame_ms
+            frame_chunker = FrameChunker(frame_bytes=outbound_frame_bytes(frame_ms, out_rate, bytes_per_sample))
             tts_rate = self._tts_provider.sample_rate_hz
             async for item in audio:
                 if self._audio_encoding == "mulaw":
                     telephony_frame = tts_pcm16_to_telephony_frame(item, tts_rate, self._resample_out)
                 else:
-                    telephony_frame = tts_pcm16_to_telephony_pcm16(item, tts_rate, self._resample_out)
+                    telephony_frame = resample_pcm16(item, tts_rate, out_rate, self._resample_out)
                 for frame in frame_chunker.push(telephony_frame):
                     await _send_paced(frame)
             remainder = frame_chunker.flush()
@@ -494,10 +540,17 @@ class VoiceSession:
 
     async def close(self) -> None:
         self._ended = True
-        for task in list(self._background):
-            task.cancel()
+        current = asyncio.current_task()  # close() may run inside the turn worker
+        for task in [*self._background, self._turn_worker]:
+            if task is not None and task is not current:
+                task.cancel()
         if self._speaking_task is not None and not self._speaking_task.done():
             self._speaking_task.cancel()
+        if self._stt_connect is not None and not self._stt_connect.done():
+            self._stt_connect.cancel()
+        elif self._stt_stream is None and self._stt_connect is not None and not self._stt_connect.cancelled():
+            if self._stt_connect.exception() is None:
+                self._stt_stream = self._stt_connect.result()
         if self._stt_stream is not None:
             await self._stt_stream.close()
         await self._tts_provider.close()

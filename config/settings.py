@@ -213,6 +213,10 @@ class Settings(BaseSettings):
     vobiz_api_base_url: str = "https://api.vobiz.ai/api/v1"
     vobiz_from_number: str = ""
     vobiz_http_timeout_seconds: float = 10.0
+    # Rate of the agent's audio sent to Vobiz (playAudio L16 takes 8000/16000/24000).
+    # 24000 = the TTS's own rate, no resampling here (clearest); lower only if a call
+    # ever plays silence.
+    vobiz_outbound_sample_rate: Literal[8000, 16000, 24000] = 24000
 
     # --- Client console (apps/api/routers/console.py + the web/ Next.js app) ---
     # The console's single shared login (one account for the client). Empty password =

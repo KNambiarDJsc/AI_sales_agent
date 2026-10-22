@@ -18,6 +18,7 @@ from database.models import CallAttempt, Campaign
 from database.repositories.call_repository import CallRepository
 from database.repositories.lead_repository import LeadRepository
 from telephony.base import OutboundCallRequest, TelephonyProvider
+from voice.session.opening import lead_fields, prerecord_opening
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +94,7 @@ async def dispatch_next_call(
     # call. The lead is already status "queued", so releasing its row lock here can't
     # let another worker claim it.
     await session.commit()
+    prerecord_opening(campaign.script_id, lead_fields(lead.contact_name, lead.business_name, lead.extra))
 
     request = OutboundCallRequest(
         to_number=lead.phone_e164,

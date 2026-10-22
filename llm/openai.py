@@ -1,12 +1,16 @@
 """OpenAI LLM adapter (Section 9 default)."""
 from __future__ import annotations
 
+import asyncio
+import logging
 import time
 from collections.abc import AsyncIterator
 
 from config.settings import get_settings
 from llm.base import LLMMessage, LLMProposal, LLMProvider
 from llm.openai_client import get_openai_client
+
+logger = logging.getLogger(__name__)
 
 
 class OpenAILLMProvider(LLMProvider):
@@ -70,13 +74,24 @@ class OpenAILLMProvider(LLMProvider):
     ) -> AsyncIterator[str]:
         # Verified against a live key (STATUS.md): streaming yields incremental deltas
         # alongside strict json_schema, which is what speculative TTS depends on.
+        loop = asyncio.get_running_loop()
+        started, first = loop.time(), True
         stream = await get_openai_client().chat.completions.create(
-            **self._request_kwargs(messages, schema_name, json_schema), stream=True
+            **self._request_kwargs(messages, schema_name, json_schema), stream=True,
+            stream_options={"include_usage": True},
         )
         async for chunk in stream:
+            if getattr(chunk, "usage", None):
+                details = getattr(chunk.usage, "prompt_tokens_details", None)
+                logger.info("llm_usage", extra={"prompt_tokens": chunk.usage.prompt_tokens,
+                                                "cached_tokens": getattr(details, "cached_tokens", None),
+                                                "seconds": round(loop.time() - started, 3)})
             if not chunk.choices:
                 continue
             delta = chunk.choices[0].delta
             content = getattr(delta, "content", None)
             if content:
+                if first:
+                    first = False
+                    logger.info("llm_first_token", extra={"seconds": round(loop.time() - started, 3)})
                 yield content

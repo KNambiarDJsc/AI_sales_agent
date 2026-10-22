@@ -84,6 +84,11 @@ class OpenAIRealtimeSTTStream(STTStream):
         self._partial_text = ""
         self._partial_updated = asyncio.Event()
         self._final_queue: asyncio.Queue[TranscriptResult] = asyncio.Queue()
+        # Commits whose caller gave up (timeout/cancel) before their transcript arrived.
+        # Every commit gets exactly one result (completed or failed), in commit order,
+        # so the next that many results belong to them — dropping them keeps a late
+        # transcript from being handed to the *next* turn (replies one turn behind).
+        self._abandoned = 0
         self._closed = False
 
     async def connect(self) -> None:
@@ -131,6 +136,10 @@ class OpenAIRealtimeSTTStream(STTStream):
                     text = (event.get("transcript") or "").strip()
                     self._partial_text = ""
                     await self._final_queue.put(TranscriptResult(text=text, is_final=True) if text else None)
+                elif event_type == "conversation.item.input_audio_transcription.failed":
+                    self._partial_text = ""
+                    logger.warning("realtime_stt_transcription_failed", extra={"error": event.get("error")})
+                    await self._final_queue.put(None)
                 elif event_type == "error":
                     logger.warning("realtime_stt_server_error", extra={"error": event.get("error")})
         except websockets.ConnectionClosed:
@@ -162,11 +171,22 @@ class OpenAIRealtimeSTTStream(STTStream):
             await self._ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
         except websockets.ConnectionClosed:
             return None
+        deadline = asyncio.get_running_loop().time() + FINAL_TRANSCRIPT_TIMEOUT_SECONDS
         try:
-            return await asyncio.wait_for(self._final_queue.get(), timeout=FINAL_TRANSCRIPT_TIMEOUT_SECONDS)
+            while True:
+                remaining = deadline - asyncio.get_running_loop().time()
+                result = await asyncio.wait_for(self._final_queue.get(), timeout=max(remaining, 0.001))
+                if self._abandoned and not self._closed:
+                    self._abandoned -= 1  # an earlier turn's late transcript, not this one's
+                    continue
+                return result
         except asyncio.TimeoutError:
+            self._abandoned += 1
             logger.warning("realtime_stt_final_timeout")
             return None
+        except asyncio.CancelledError:
+            self._abandoned += 1
+            raise
 
     async def close(self) -> None:
         self._closed = True

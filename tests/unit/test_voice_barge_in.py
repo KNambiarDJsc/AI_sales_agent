@@ -40,6 +40,21 @@ async def _feed(session, pattern):
             await session._process_vad_frame(b"\x00" * 640)
 
 
+@pytest.fixture(autouse=True)
+async def _stop_turn_workers(monkeypatch):
+    sessions = []
+    original = VoiceSession._queue_turn
+
+    def tracking(self, talked_over):
+        sessions.append(self)
+        original(self, talked_over)
+    monkeypatch.setattr(VoiceSession, "_queue_turn", tracking)
+    yield
+    for s in sessions:
+        if s._turn_worker is not None:
+            s._turn_worker.cancel()
+
+
 async def _agent_talking(session):
     session._speaking_task = asyncio.create_task(asyncio.sleep(30))
 
@@ -49,12 +64,51 @@ async def test_short_backchannel_while_agent_talks_neither_interrupts_nor_gets_a
     s = _session(tel)
     s._stt_stream = FinalOnce("haan")
     replied = []
-    s._on_turn_ended = lambda: replied.append(1) or asyncio.sleep(0)
+    s._on_turn_ended = lambda text: replied.append(text) or asyncio.sleep(0)
     await _agent_talking(s)
     await _feed(s, [(True, 300 // FRAME_MS), (False, 1000 // FRAME_MS)])  # 0.3 s "haan", then silence
+    await s._turns_done()
     assert not tel.cleared and not s._speaking_task.done()  # agent kept talking
     assert replied == [] and s._stt_stream.calls == 1  # transcript taken out, no reply
     s._speaking_task.cancel()
+
+
+async def test_a_short_real_answer_over_the_agent_still_gets_a_reply():
+    # Live Vobiz call: a quick "no" said while the agent was finishing its sentence was
+    # thrown away as a backchannel, and the agent sat waiting for an answer already given.
+    tel = Pcm16Telephony()
+    s = _session(tel)
+    s._stt_stream = FinalOnce("No, not interested")
+    replied = []
+    s._on_turn_ended = lambda text: replied.append(text) or asyncio.sleep(0)
+    await _agent_talking(s)
+    await _feed(s, [(True, 300 // FRAME_MS), (False, 1000 // FRAME_MS)])
+    await s._turns_done()
+    assert not tel.cleared  # didn't cut the agent off...
+    assert replied == ["No, not interested"]  # ...but the answer is answered
+    s._speaking_task.cancel()
+
+
+async def test_listening_never_waits_for_the_reply():
+    # Live Vobiz call: handle_inbound_audio awaited the whole LLM turn, so the call
+    # stopped listening while the agent thought — barge-in and the next turn stalled.
+    tel = Pcm16Telephony()
+    s = _session(tel)
+    s._stt_stream = FinalOnce("tell me more")
+    release = asyncio.Event()
+    replied = []
+
+    async def slow_turn(text):
+        replied.append(text)
+        await release.wait()
+    s._on_turn_ended = slow_turn
+    await asyncio.wait_for(_feed(s, [(True, 400 // FRAME_MS), (False, 800 // FRAME_MS)]), 1)
+    await asyncio.sleep(0.01)
+    assert replied == ["tell me more"]  # the turn is being answered...
+    await asyncio.wait_for(_feed(s, [(True, 400 // FRAME_MS), (False, 800 // FRAME_MS)]), 1)  # ...and we still listen
+    release.set()
+    await s._turns_done()
+    assert replied == ["tell me more", "tell me more"]
 
 
 async def test_sustained_speech_interrupts_and_gets_a_reply():
@@ -63,11 +117,12 @@ async def test_sustained_speech_interrupts_and_gets_a_reply():
     s._stt_stream = FinalOnce("wait, I have a question")
     replied = []
 
-    async def on_turn():
+    async def on_turn(text):
         replied.append(1)
     s._on_turn_ended = on_turn
     await _agent_talking(s)
     await _feed(s, [(True, 900 // FRAME_MS), (False, 1000 // FRAME_MS)])
+    await s._turns_done()
     assert tel.cleared and s._speaking_task is None  # cut off after ~0.6 s of speech
     assert replied == [1]
 
@@ -139,3 +194,21 @@ async def test_time_limit_says_goodbye_then_hangs_up_and_takes_no_more_turns():
     assert said == ["Sorry, I have to wrap up now."]
     assert len(tel.hung_up) == 1 and s.ended
     await s._run_agent_turn("one more thing")  # ignored: no new reply after the goodbye
+
+
+async def test_vobiz_audio_goes_out_at_the_tts_rate_untouched():
+    # Live Vobiz call: 24 kHz TTS squeezed to 8 kHz by a filterless resampler sounded
+    # harsh and unclear. Vobiz takes 24 kHz L16, so the samples go out as they are.
+    tel = Pcm16Telephony()
+    tel.outbound_sample_rate_hz = 24000
+    tel.outbound_frame_ms = 40
+    tel.outbound_lead_ms = 10_000
+    s = _session(tel)
+    pcm = bytes(range(256)) * 30  # 7680 bytes = 160 ms at 24 kHz
+    await s._play(_one(pcm))
+    assert b"".join(tel.sent_frames) == pcm
+    assert {len(f) for f in tel.sent_frames} == {1920}  # 40 ms at 24 kHz, 16-bit
+
+
+async def _one(pcm):
+    yield pcm

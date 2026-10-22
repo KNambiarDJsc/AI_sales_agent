@@ -47,6 +47,7 @@ from telephony.base import TelephonyProvider
 from telephony.factory import get_telephony_provider
 from telephony.vobiz import VobizProvider
 from voice.audio.processing import TELEPHONY_SAMPLE_RATE_HZ
+from voice.session.opening import lead_fields
 from voice.session.session import SessionIdentity, VoiceSession
 
 logger = logging.getLogger(__name__)
@@ -95,7 +96,7 @@ async def _resolve_attempt_and_build_session(
             script_id=script.script_id,
             script_version=script.version,
             current_state="INTRO",
-            lead_fields={"contact_name": lead.contact_name, "business_name": lead.business_name, **lead.extra},
+            lead_fields=lead_fields(lead.contact_name, lead.business_name, lead.extra),
             campaign_prompt=campaign_prompt,
             timezone=campaign.timezone,
         )

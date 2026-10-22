@@ -78,6 +78,13 @@ class TelephonyProvider(ABC):
     # (clear_audio); the lead absorbs network/event-loop hiccups that otherwise reach
     # the caller as gaps in the agent's voice.
     outbound_lead_ms: int = 0
+    # Sample rate of outbound PCM16 (audio_encoding "pcm16" only). 8 kHz unless the
+    # provider documents accepting more — then TTS audio goes out at its own rate with
+    # no resampling here (audioop's resampler has no anti-alias filter: 24k -> 8k made
+    # the voice harsh and hard to follow on a live call).
+    outbound_sample_rate_hz: int = 8000
+    # Outbound frame size; None = settings.outbound_frame_ms.
+    outbound_frame_ms: int | None = None
 
     @abstractmethod
     async def create_outbound_call(self, request: OutboundCallRequest) -> OutboundCallResult:

@@ -57,15 +57,16 @@ sequenceDiagram
     loop every 4 s, one lead at a time, only inside calling hours
         API->>DB: Claim next pending lead (checks do-not-call again)
         API->>VZ: Place call (hard time limit 120 s)
+        API->>AI: Record this lead's greeting while the phone rings
         VZ->>L: Phone rings
         L-->>VZ: Picks up
         VZ->>API: Open audio stream
-        API->>L: "Hello, am I speaking with Naman from Demo Business?"
+        API->>L: "Hello, am I speaking with Naman from Demo Business?" (instant)
         loop each turn of the conversation
             L->>API: Speaks
             API->>AI: Transcribe, then propose a reply
             API->>API: Validate the reply against the script
-            API->>L: Agent speaks (starts within ~1 s)
+            API->>L: "Hmm." at ~1.3 s, the reply at ~3 s
         end
         API->>VZ: Hang up (or lead hangs up / 2-min limit / 30 s silence)
         VZ->>API: Call ended (webhook)
@@ -156,6 +157,23 @@ flowchart TD
     H --> J["Run the tool, if any<br/>(book callback, save qualification…)"]
     H --> K["Save turn + transcript<br/>(in the background)"]
 ```
+
+Where the ~3 s goes (measured): noticing they stopped 0.6 s · speech-to-text 0.7 s ·
+the LLM's first words 1.0–1.4 s · first voice audio 0.8 s. The pre-recorded filler
+covers the wait. Faster/cheaper models were tested and rejected: `gpt-4.1-nano` made up
+facts and booked wrong callback times.
+
+The call never stops listening while the agent thinks or talks: each finished sentence
+from the customer joins a queue and is answered in order.
+
+**Talking over the agent:**
+- Long speech (over 0.6 s) cuts the agent off, and it answers.
+- A short "haan / okay / hmm" is ignored; the agent keeps talking.
+- A short real answer ("no", a question) is answered right after the agent finishes.
+
+The agent's voice goes to Vobiz at the TTS's own 24 kHz, untouched
+(`VOBIZ_OUTBOUND_SAMPLE_RATE`). Converting it to 8 kHz ourselves made it harsh and
+hard to follow.
 
 Rule of the house: **the AI proposes, the app decides.** The model never directly
 changes a lead's result, never skips the script, never runs a tool that state doesn't

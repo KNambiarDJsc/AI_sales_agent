@@ -4,6 +4,30 @@ Last updated: 2026-10-22 (client console + client conversation flow). Read this 
 it tracks what's real vs. placeholder, and what happens when client materials (code,
 prompts, scripts, credentials, models) arrive.
 
+## Call quality fixes after a live Vobiz test (2026-10-22, evening)
+
+Reported: the agent's voice was hard to hear, and it "got stuck" after the customer
+spoke. Causes found and fixed (`voice/session/session.py`, `telephony/vobiz.py`,
+`speech/stt/openai_realtime.py`):
+- **Stuck:** the media loop awaited the whole LLM turn, so the call stopped listening while
+  the agent thought, then processed a burst of stale audio. Turns now go to a queue
+  (`_process_turns`); the STT request still starts the moment the turn ends.
+- **Lost answers:** a short reply said over the agent ("no") was thrown away as a
+  backchannel. Only real backchannels (`acknowledgments.is_backchannel`) are dropped now.
+- **Unclear voice:** 24 kHz TTS was resampled to 8 kHz with `audioop.ratecv`, which has no
+  anti-alias filter. Vobiz accepts L16 at 24 kHz, so audio now goes out untouched, in
+  40 ms chunks with a 600 ms lead.
+- **Silent first 1.5–2 s:** the greeting is recorded while the phone rings
+  (`voice/session/opening.py`), and STT connects in the background.
+- **Replies one turn behind:** a late or failed STT transcript could be handed to the next
+  turn. Late transcripts are now dropped, and failed ones still answer their turn.
+- **Language and time-zone questions:** the language hint is deterministic (English unless
+  Hindi words are present), and the prompt says never ask about time zones.
+
+Measured with a local Vobiz simulator: filler at ~1.3 s, the reply at ~3 s.
+Eval: `gpt-4.1-mini` stays; `gpt-4.1-nano` is 0.5 s faster but made up facts and booked
+wrong times. Priority tier: 0.25 s faster at ~1.75x LLM cost — not enabled.
+
 ## Client console (web/) + the client's conversation flow (2026-10-22)
 
 **Console** — a Next.js 16 app in `web/` (port 3100) on top of `apps/api/routers/console.py`:

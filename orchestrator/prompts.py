@@ -113,6 +113,17 @@ def _time_left_text(script: ScriptConfig, context: ConversationContext) -> list[
     return [text]
 
 
+# Common Hindi words as they come out of English-letter transcription — enough to
+# tell Hinglish from English; an English sentence contains none of them.
+_ROMAN_HINDI_WORDS = frozenset(
+    "haan haa han nahi nahin nai kya kyun kyon kaise kaisa kitna kitne kitni hai hain tha thi ho hoon hu "
+    "mujhe mujhko humein hume hum aap aapka aapki mera meri mere hamara apna bhai ji theek thik achha acha "
+    "accha bolo boliye bataiye batao karna karo karenge karunga chahiye chahte abhi baad kal parso subah "
+    "shaam raat dopahar paisa paise rupay rupaye bhej bhejo bhejiye matlab samjha samajh dobara mat lekin "
+    "aur zaroor zarur bilkul kuch koi sab bahut bohot wala wali baat phir fir yaar arre arey".split()
+)
+
+
 def _reply_language_hint(script: ScriptConfig, customer_text: str) -> str:
     """Which language this reply should be in, read off the customer's latest line —
     with match_customer and Hindi + English. Without it the model drifted: a Hindi
@@ -122,11 +133,11 @@ def _reply_language_hint(script: ScriptConfig, customer_text: str) -> str:
         return ""
     if _DEVANAGARI.search(customer_text):
         return "Reply language: the customer's latest message is in Hindi/Hinglish, so reply in Hindi/Hinglish."
-    return (
-        "Reply language: the customer's latest message is in Latin letters. If its words are English, reply in "
-        "English. If it is Hindi written in English letters (e.g. 'haan bolo', 'kya karna padega'), reply in "
-        "Hinglish."
-    )
+    if set(re.findall(r"[a-z]+", customer_text.lower())) & _ROMAN_HINDI_WORDS:
+        return "Reply language: the customer is speaking Hinglish (Hindi in English letters), so reply in Hinglish."
+    # Leaving English-vs-Hinglish to the model: a Hinglish reply to "No, I'm not sure"
+    # in a simulated call.
+    return "Reply language: the customer's latest message is English, so reply in English."
 
 
 def _knowledge_lines(campaign_prompt: dict) -> list[str]:

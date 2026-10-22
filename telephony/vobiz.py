@@ -186,7 +186,14 @@ class VobizProvider(TelephonyProvider):
     # Vobiz queues playAudio and clearAudio drops the queue (docs: xml/stream/
     # clear-audio), so audio may run slightly ahead — strict real-time pacing let every
     # hiccup become a gap the caller heard.
-    outbound_lead_ms = 400
+    outbound_lead_ms = 600
+    # playAudio takes L16 at 8, 16 or 24 kHz (docs: concepts/streaming-websockets,
+    # "Outbound playback formats" — and "do not automatically downsample every TTS
+    # response"): OpenAI/Kokoro TTS is 24 kHz, so it goes out untouched and Vobiz
+    # converts it for the phone leg. Chunks of 20-60 ms are recommended; 40 ms halves
+    # the message count through the tunnel.
+    outbound_sample_rate_hz = 24000  # settings.vobiz_outbound_sample_rate
+    outbound_frame_ms = 40
 
     def __init__(self, transport: httpx.AsyncBaseTransport | None = None) -> None:
         settings = get_settings()
@@ -199,6 +206,7 @@ class VobizProvider(TelephonyProvider):
         self._max_call_seconds = settings.default_max_call_duration_seconds
         self._transport = transport  # tests inject httpx.MockTransport here
         self._streams: dict[str, _Stream] = {}
+        self.outbound_sample_rate_hz = settings.vobiz_outbound_sample_rate
 
     # --- URLs we hand to Vobiz ---------------------------------------------------
 
@@ -354,7 +362,7 @@ class VobizProvider(TelephonyProvider):
                     "streamId": stream.stream_id,
                     "media": {
                         "contentType": PLAY_CONTENT_TYPE,
-                        "sampleRate": SAMPLE_RATE_HZ,
+                        "sampleRate": self.outbound_sample_rate_hz,
                         "payload": base64.b64encode(audio_chunk).decode("ascii"),
                     },
                 }

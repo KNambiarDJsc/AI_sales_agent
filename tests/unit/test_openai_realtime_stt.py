@@ -168,3 +168,28 @@ async def test_receive_final_times_out_gracefully_if_nothing_arrives(monkeypatch
         assert result is None  # timed out, not a crash
     finally:
         await stream.close()
+
+
+async def test_a_late_transcript_is_not_handed_to_the_next_turn(monkeypatch):
+    # A turn whose transcript timed out must not shift every later reply by one turn.
+    monkeypatch.setattr(rt_module, "FINAL_TRANSCRIPT_TIMEOUT_SECONDS", 0.05)
+    stream, fake_ws = await _connected_stream(monkeypatch, [_session_created(), _session_updated()])
+    try:
+        assert await stream.receive_final() is None  # turn 1 times out
+        await stream._final_queue.put(rt_module.TranscriptResult(text="turn one", is_final=True))  # arrives late
+        await stream._final_queue.put(rt_module.TranscriptResult(text="turn two", is_final=True))
+        monkeypatch.setattr(rt_module, "FINAL_TRANSCRIPT_TIMEOUT_SECONDS", 1)
+        result = await stream.receive_final()
+        assert result is not None and result.text == "turn two"
+    finally:
+        await stream.close()
+
+
+async def test_failed_transcription_still_answers_its_turn(monkeypatch):
+    failed = json.dumps({"type": "conversation.item.input_audio_transcription.failed", "item_id": "item_1",
+                         "error": {"message": "bad audio"}})
+    stream, fake_ws = await _connected_stream(monkeypatch, [_session_created(), _session_updated(), failed])
+    try:
+        assert await asyncio.wait_for(stream.receive_final(), 1) is None  # promptly, not after the timeout
+    finally:
+        await stream.close()
