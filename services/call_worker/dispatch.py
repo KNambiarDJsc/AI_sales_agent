@@ -72,7 +72,15 @@ async def dispatch_next_call(
         await session.flush()
         return False
 
-    attempt_number = lead.attempts_count + 1
+    # From the attempts that exist, not lead.attempts_count: a call closed out without
+    # bumping the count (e.g. never placed) made every later attempt for that lead hit
+    # the unique constraint — a test call that "rang then disappeared" forever.
+    last_number = (await session.execute(
+        select(func.max(CallAttempt.attempt_number)).where(
+            CallAttempt.campaign_id == campaign.id, CallAttempt.lead_id == lead.id
+        )
+    )).scalar_one()
+    attempt_number = max(lead.attempts_count, last_number or 0) + 1
     attempt = CallAttempt(
         campaign_id=campaign.id,
         lead_id=lead.id,

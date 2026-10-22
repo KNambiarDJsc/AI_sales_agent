@@ -218,8 +218,9 @@ transcript of every call), and the **Excel export** (sheets: *All leads*, *Calls
 ## 7. Running it locally
 
 ```powershell
-# 1. Backend (Postgres must be running on port 55434)
-.\.venv\Scripts\python.exe -m uvicorn apps.api.main:app --port 8000
+# 1. Backend in its own window (starts Postgres too, restarts itself if it stops;
+#    log also in %LOCALAPPDATA%oiceagent-backend.log). Keep that window open.
+scripts\start_backend.cmd
 
 # 2. Public URL so Vobiz can reach the laptop (writes PUBLIC_BASE_URL into .env;
 #    restart the backend after it)

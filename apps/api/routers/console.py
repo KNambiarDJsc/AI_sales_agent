@@ -403,12 +403,13 @@ async def test_call(body: TestCall) -> dict:
         lead.extra = _with_category({k: v for k, v in (lead.extra or {}).items() if k != "product_category"}, body.category)
         test_c.status = "active"
         await session.flush()
+        lead_id = lead.id  # dispatch may roll back, which expires `lead`
         try:
             dispatched = await _dispatch_one(session, test_c)
         finally:
             test_c.status = "paused"
         attempt = (await session.execute(
-            select(CallAttempt).where(CallAttempt.lead_id == lead.id).order_by(CallAttempt.created_at.desc()).limit(1)
+            select(CallAttempt).where(CallAttempt.lead_id == lead_id).order_by(CallAttempt.created_at.desc()).limit(1)
         )).scalar_one_or_none()
         if not dispatched:
             detail = attempt.error if attempt is not None and attempt.error else "The call could not be placed"

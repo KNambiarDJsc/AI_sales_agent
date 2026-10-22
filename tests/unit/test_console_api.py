@@ -162,3 +162,26 @@ def test_a_call_the_provider_says_is_over_stops_showing_live(console):
     client.portal.call(age_and_reconcile, 1)
     assert client.get("/console/overview").json()["live"] is None
     assert client.get(f"/console/calls/{attempt_id}").json()["status"] == "no_answer"
+
+
+@requires_db
+def test_a_number_can_be_test_called_again_after_a_call_that_never_counted(console):
+    # Live, 2026-10-22: a test call closed out without bumping the lead's attempt count,
+    # so the next test call reused attempt number 1, hit the unique constraint and
+    # failed with a 500 — "it shows ringing, then disappears", for every later try.
+    from database.models import CallAttempt, Lead
+    from database.session import session_scope
+
+    client, telephony = console
+    first = client.post("/console/calls/test", json={"phone": "9876543214"}).json()["attempt_id"]
+    client.post(f"/console/calls/{first}/hangup")
+
+    async def forget_the_attempt():
+        async with session_scope() as session:
+            attempt = await session.get(CallAttempt, uuid.UUID(first))
+            (await session.get(Lead, attempt.lead_id)).attempts_count = 0
+
+    client.portal.call(forget_the_attempt)
+    resp = client.post("/console/calls/test", json={"phone": "9876543214"})
+    assert resp.status_code == 200, resp.text
+    assert len(telephony.calls) == 2
