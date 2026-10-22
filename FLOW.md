@@ -219,7 +219,7 @@ transcript of every call), and the **Excel export** (sheets: *All leads*, *Calls
 
 ```powershell
 # 1. Backend in its own window (starts Postgres too, restarts itself if it stops;
-#    log also in %LOCALAPPDATA%oiceagent-backend.log). Keep that window open.
+#    log also in %LOCALAPPDATA%\voiceagent-backend.log). Keep that window open.
 scripts\start_backend.cmd
 
 # 2. Public URL so Vobiz can reach the laptop (writes PUBLIC_BASE_URL into .env;
