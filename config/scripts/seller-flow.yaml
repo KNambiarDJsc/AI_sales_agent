@@ -216,7 +216,12 @@ acknowledgments:
 sales_followup_states: [INTERESTED]
 not_interested_states: [NOT_INTERESTED]
 
-max_call_duration_seconds: 420   # PLACEHOLDER — confirm with client
+# Calls never run past 2 minutes (owner's rule, 2026-10-22). The agent is told how much
+# time is left and wraps up; near the end it says time_up_line and hangs up.
+max_call_duration_seconds: 120
+time_up_line:   # PLACEHOLDER wording
+  en: "I'm sorry, I have to wrap up now. Thank you for your time, and our team will follow up if needed."
+  hi: "माफ़ कीजिए, मुझे अब कॉल खत्म करनी होगी। आपके समय के लिए धन्यवाद, ज़रूरत हुई तो हमारी टीम आपसे संपर्क करेगी।"
 retry_limits:
   per_question: 2
   per_state: 3

@@ -98,7 +98,7 @@ export default function Dashboard() {
       <div className="grid gap-6 lg:grid-cols-5">
         <div className="space-y-6 lg:col-span-3">
           {data.live ? (
-            <LiveCallCard live={data.live} />
+            <LiveCallCard live={data.live} limit={data.max_call_seconds} onEnded={refresh} />
           ) : (
             <div className="card flex flex-col items-center justify-center gap-3 p-10 text-center">
               <div className="rounded-2xl bg-brand/20 p-4">

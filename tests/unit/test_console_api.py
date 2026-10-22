@@ -20,11 +20,18 @@ class FakeTelephony:
     name = "fake"
 
     def __init__(self):
-        self.calls = []
+        self.calls, self.hung_up = [], []
+        self.live = CallStatus.IN_PROGRESS
 
     async def create_outbound_call(self, request):
         self.calls.append(request)
         return OutboundCallResult(provider_call_id=f"fake-{uuid.uuid4().hex[:8]}", status=CallStatus.QUEUED)
+
+    async def hangup_call(self, provider_call_id):
+        self.hung_up.append(provider_call_id)
+
+    async def get_call_status(self, provider_call_id):
+        return self.live
 
 
 @pytest.fixture
@@ -115,3 +122,43 @@ def test_overview_template_and_export_work(console):
     assert client.post("/console/campaign/start").json() == {"status": "active"}
     assert client.put("/console/campaign/hours", json={"start": "10:00", "end": "18:30"}).status_code == 200
     assert client.get("/console/overview").json()["campaign"]["call_window_end"] == "18:30"
+
+
+@requires_db
+def test_end_call_button_hangs_up_and_the_call_stops_showing_live(console):
+    client, telephony = console
+    attempt_id = client.post("/console/calls/test", json={"phone": "9876543212"}).json()["attempt_id"]
+    assert client.post(f"/console/calls/{attempt_id}/hangup").json() == {"ended": True}
+    assert len(telephony.hung_up) == 1
+    assert client.get("/console/overview").json()["live"] is None  # no webhook needed
+    assert client.get(f"/console/calls/{attempt_id}").json()["status"] == "canceled"
+    assert client.post("/console/calls/test", json={"phone": "9876543212"}).status_code == 200  # not blocked
+
+
+@requires_db
+def test_a_call_the_provider_says_is_over_stops_showing_live(console):
+    # Vobiz once kept a call open after the customer hung up and sent no webhook.
+    from datetime import timedelta
+
+    from apps.api.routers import console as console_module
+    from database.models import CallAttempt
+    from database.session import session_scope
+
+    client, telephony = console
+    attempt_id = client.post("/console/calls/test", json={"phone": "9876543213"}).json()["attempt_id"]
+
+    async def age_and_reconcile(times):
+        async with session_scope() as session:
+            attempt = await session.get(CallAttempt, uuid.UUID(attempt_id))
+            attempt.created_at = attempt.created_at - timedelta(seconds=90)
+        for _ in range(times):
+            await console_module._reconcile_live_calls()
+
+    client.portal.call(age_and_reconcile, 2)  # provider says still live: untouched
+    assert client.get("/console/overview").json()["live"]["attempt_id"] == attempt_id
+    telephony.live = CallStatus.UNKNOWN
+    client.portal.call(age_and_reconcile, 1)  # one "not live" answer isn't enough
+    assert client.get("/console/overview").json()["live"] is not None
+    client.portal.call(age_and_reconcile, 1)
+    assert client.get("/console/overview").json()["live"] is None
+    assert client.get(f"/console/calls/{attempt_id}").json()["status"] == "no_answer"

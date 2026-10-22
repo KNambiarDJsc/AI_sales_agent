@@ -16,6 +16,7 @@ Interested / Callback requested / Not interested / Do not call / Unclear / No an
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import io
 import logging
 import time
@@ -34,9 +35,12 @@ from apps.api.console_auth import issue_token, password_is_correct, require_cons
 from config.settings import get_settings
 from database.models import CallAttempt, Campaign, Conversation, Lead, Tenant, TranscriptSegment, Turn
 from database.session import session_scope
+from database.repositories.call_repository import CallRepository
 from services.call_worker.dispatch import dispatch_next_call
+from services.call_worker.lifecycle import finalize_call
 from services.campaign.service import CampaignService
 from services.lead_import.importer import guess_column_mapping, import_leads
+from telephony.base import CallStatus
 from telephony.factory import get_telephony_provider
 from workers.call_log import CallRow, collect_rows, write_workbook
 
@@ -49,6 +53,10 @@ LEADS_CAMPAIGN = "Leads"
 TEST_CAMPAIGN = "Test calls"
 ACTIVE_CALL_STATUSES = ("queued", "dialing", "ringing", "in_progress")
 DIALER_POLL_SECONDS = 4
+# Every this many dialer ticks, check calls we think are live against the provider.
+RECONCILE_EVERY_TICKS = 5
+# How long a call may look live before we start asking the provider whether it really is.
+RECONCILE_AFTER_SECONDS = 45
 
 
 # --------------------------------------------------------------------------- setup
@@ -78,7 +86,9 @@ async def _campaigns(session) -> tuple[Campaign, Campaign]:
                 config={"console": True, "campaign_prompt_path": s.console_campaign_prompt},
             )
             session.add(found[name])
-        elif found[name].script_id != s.console_script_id:  # the configured flow changed
+        if found[name].max_call_duration_seconds != s.default_max_call_duration_seconds:
+            found[name].max_call_duration_seconds = s.default_max_call_duration_seconds
+        if found[name].script_id != s.console_script_id:  # the configured flow changed
             found[name].script_id = s.console_script_id
             found[name].config = {**found[name].config, "campaign_prompt_path": s.console_campaign_prompt}
     await session.flush()
@@ -201,6 +211,7 @@ async def overview() -> dict:
     return {
         "campaign": campaign,
         "within_calling_hours": _within_window(campaign),
+        "max_call_seconds": get_settings().default_max_call_duration_seconds,
         "leads": {"total": sum(by_status.values()), "pending": by_status.get("pending", 0) + by_status.get("queued", 0),
                   "by_status": by_status},
         "results": results,
@@ -424,6 +435,45 @@ async def call_detail(attempt_id: uuid.UUID) -> dict:
     return {**_row_dict(row), "facts": row.facts, "transcript": lines}
 
 
+async def _end_attempt(session, attempt: CallAttempt, reason: str) -> None:
+    """Record the end of a call whose end the provider never reported to us (or that we
+    ended ourselves), the same way the hangup webhook does — so the console stops
+    showing it as live and the dialer moves on."""
+    talked = (await session.execute(
+        select(func.count()).select_from(Conversation).where(Conversation.call_attempt_id == attempt.id)
+    )).scalar_one()
+    status = "completed" if talked else ("canceled" if reason == "ended_from_console" else "no_answer")
+    await CallRepository(session).mark_attempt_status(attempt.id, status, ended_at=datetime.now(timezone.utc))
+    await finalize_call(session, attempt.id, call_status=status, ended_reason=reason)
+
+
+@router.post("/calls/{attempt_id}/hangup", dependencies=[Depends(require_console)])
+async def hang_up(attempt_id: uuid.UUID) -> dict:
+    """End a call from the console (the End call button)."""
+    async with session_scope() as session:
+        leads_c, test_c = await _campaigns(session)
+        attempt = await session.get(CallAttempt, attempt_id)
+        if attempt is None or attempt.campaign_id not in (leads_c.id, test_c.id):
+            raise HTTPException(status_code=404, detail="Call not found")
+        if attempt.status not in ACTIVE_CALL_STATUSES:
+            return {"ended": True}
+        campaign = leads_c if attempt.campaign_id == leads_c.id else test_c
+        if attempt.provider_call_id:
+            try:
+                await get_telephony_provider(campaign.telephony_provider).hangup_call(attempt.provider_call_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("console_hangup_failed", extra={"call_attempt_id": str(attempt.id), "error": str(exc)[:200]})
+                raise HTTPException(status_code=502, detail=f"The phone provider refused to end the call: {exc}") from exc
+    # The provider's hangup webhook normally lands within a second or two; record the
+    # end ourselves if it doesn't, so the button always ends the call in the console.
+    await asyncio.sleep(3)
+    async with session_scope() as session:
+        attempt = await session.get(CallAttempt, attempt_id)
+        if attempt is not None and attempt.status in ACTIVE_CALL_STATUSES:
+            await _end_attempt(session, attempt, "ended_from_console")
+    return {"ended": True}
+
+
 @router.get("/export.xlsx", dependencies=[Depends(require_console)])
 async def export_excel() -> Response:
     """All leads (current status + latest result), every call, and the interested leads."""
@@ -516,8 +566,12 @@ async def run_console_dialer() -> None:
     within its calling hours. `dispatch_next_call` holds every rule (call window,
     concurrency = 1, DNC suppression, idempotent attempts)."""
     logger.info("console_dialer_started")
+    tick = 0
     while True:
+        tick += 1
         try:
+            if tick % RECONCILE_EVERY_TICKS == 0:
+                await _reconcile_live_calls()
             async with session_scope() as session:
                 leads_c, _ = await _campaigns(session)
                 if leads_c.status == "active" and _public_base().startswith("https://"):
@@ -527,3 +581,47 @@ async def run_console_dialer() -> None:
         except Exception:  # noqa: BLE001 - one bad tick must not stop the dialer
             logger.exception("console_dialer_tick_failed")
         await asyncio.sleep(DIALER_POLL_SECONDS)
+
+
+_not_live_checks: dict[uuid.UUID, int] = {}
+
+
+async def _reconcile_live_calls() -> None:
+    """Calls the console thinks are still live, checked against the provider. Seen on a
+    real Vobiz call (2026-10-22): the customer hung up but Vobiz kept the call open and
+    sent no hangup webhook, so the console showed it as live (and blocked the next test
+    call) until it was ended by hand. Two "not live" answers in a row end it here; a
+    call past its maximum length is hung up."""
+    s = get_settings()
+    now = datetime.now(timezone.utc)
+    async with session_scope() as session:
+        leads_c, test_c = await _campaigns(session)
+        attempts = (await session.execute(
+            select(CallAttempt).where(CallAttempt.campaign_id.in_([leads_c.id, test_c.id]),
+                                      CallAttempt.status.in_(ACTIVE_CALL_STATUSES))
+        )).scalars().all()
+        for attempt in attempts:
+            age = (now - attempt.created_at).total_seconds()
+            if age < RECONCILE_AFTER_SECONDS:
+                continue
+            if not attempt.provider_call_id:
+                if age > 120:  # never reached the provider
+                    await _end_attempt(session, attempt, "never_placed")
+                continue
+            campaign = leads_c if attempt.campaign_id == leads_c.id else test_c
+            provider = get_telephony_provider(campaign.telephony_provider)
+            try:
+                status = await asyncio.wait_for(provider.get_call_status(attempt.provider_call_id), 10)
+            except Exception:  # noqa: BLE001 - provider can't tell (or no API): leave it to the webhook
+                continue
+            if status in (CallStatus.IN_PROGRESS, CallStatus.RINGING):
+                _not_live_checks.pop(attempt.id, None)
+                if age > s.default_max_call_duration_seconds + 60:
+                    with contextlib.suppress(Exception):
+                        await provider.hangup_call(attempt.provider_call_id)
+                continue
+            _not_live_checks[attempt.id] = _not_live_checks.get(attempt.id, 0) + 1
+            if _not_live_checks[attempt.id] >= 2:
+                _not_live_checks.pop(attempt.id, None)
+                logger.warning("console_call_reconciled", extra={"call_attempt_id": str(attempt.id)})
+                await _end_attempt(session, attempt, "provider_reports_ended")

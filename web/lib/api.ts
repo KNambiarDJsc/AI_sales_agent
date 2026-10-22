@@ -59,6 +59,7 @@ export interface LiveCall {
 export interface Overview {
   campaign: { status: string; call_window_start: string; call_window_end: string; timezone: string };
   within_calling_hours: boolean;
+  max_call_seconds: number;
   leads: { total: number; pending: number; by_status: Record<string, number> };
   results: Partial<Record<Result, number>>;
   calls_total: number;
@@ -169,6 +170,7 @@ export const api = {
   testCall: (body: { phone: string; name: string; business: string; category: string }) =>
     request<{ attempt_id: string; status: string }>("/console/calls/test", { method: "POST", body: JSON.stringify(body) }),
   calls: () => request<CallRow[]>("/console/calls"),
+  hangup: (id: string) => request<{ ended: boolean }>(`/console/calls/${id}/hangup`, { method: "POST" }),
   call: (id: string) => request<CallDetail>(`/console/calls/${id}`),
   start: () => request<{ status: string }>("/console/campaign/start", { method: "POST" }),
   pause: () => request<{ status: string }>("/console/campaign/pause", { method: "POST" }),

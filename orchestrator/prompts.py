@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
@@ -14,7 +15,7 @@ from zoneinfo import ZoneInfo
 
 import yaml
 
-from config.settings import PROMPTS_DIR, REPO_ROOT
+from config.settings import PROMPTS_DIR, REPO_ROOT, get_settings
 from llm.base import LLMMessage
 from orchestrator.context import ConversationContext
 from orchestrator.state_machine import ScriptConfig, substitute_placeholders
@@ -98,6 +99,20 @@ def _language_instruction(script: ScriptConfig) -> str:
 _DEVANAGARI = re.compile(r"[ऀ-ॿ]")
 
 
+def _time_left_text(script: ScriptConfig, context: ConversationContext) -> list[str]:
+    """The call's hard time limit and what's left of it, so the model wraps up in time
+    instead of being cut off (the voice session hangs up at the limit regardless)."""
+    if context.call_started_at is None:
+        return []
+    limit = min(script.max_call_duration_seconds, get_settings().default_max_call_duration_seconds)
+    left = max(0, int(limit - (time.monotonic() - context.call_started_at)))
+    text = f"Call time: {left} seconds left of a hard {limit}-second limit - keep every reply short and moving."
+    if left <= 45:
+        text += (" Almost out of time: wrap up in this reply - if they're interested, confirm the specialist "
+                 "will call them (schedule_callback) and close; otherwise thank them and close.")
+    return [text]
+
+
 def _reply_language_hint(script: ScriptConfig, customer_text: str) -> str:
     """Which language this reply should be in, read off the customer's latest line —
     with match_customer and Hindi + English. Without it the model drifted: a Hindi
@@ -178,6 +193,7 @@ def _turn_context_text(script: ScriptConfig, context: ConversationContext) -> st
         "Resolve any relative time the customer gives (e.g. \"tomorrow at 8am\", \"Monday evening\") "
         "against this when calling schedule_callback — requested_time must be an absolute "
         "ISO 8601 datetime, never a relative phrase.",
+        *_time_left_text(script, context),
         f"Current conversation state: {context.current_state}",
         f"State objective: {state_cfg.objective}",
         f"Valid values for 'state' this turn (you MUST pick one of these exactly — "

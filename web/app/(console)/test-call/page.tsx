@@ -3,7 +3,7 @@
 import { Suspense, useEffect, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { PhoneOutgoing, RotateCcw, ShieldCheck, Smartphone } from "lucide-react";
+import { PhoneOff, PhoneOutgoing, RotateCcw, ShieldCheck, Smartphone } from "lucide-react";
 import { api, fmtDuration, type CallDetail, type LiveCall } from "@/lib/api";
 import { LiveCallCard, Bubble } from "@/components/LiveCall";
 import { ErrorNote, PageHeader, ResultChip, Spinner } from "@/components/ui";
@@ -29,6 +29,7 @@ function TestCall() {
   const [phase, setPhase] = useState<Phase>("idle");
   const [attemptId, setAttemptId] = useState<string | null>(null);
   const [live, setLive] = useState<LiveCall | null>(null);
+  const [limit, setLimit] = useState(120);
   const [result, setResult] = useState<CallDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -56,6 +57,7 @@ function TestCall() {
       try {
         const o = await api.overview();
         if (stopped) return;
+        setLimit(o.max_call_seconds);
         if (o.live && o.live.attempt_id === attemptId) {
           seen = true;
           setLive(o.live);
@@ -63,7 +65,7 @@ function TestCall() {
         } else if (seen || !o.live) {
           const detail = await api.call(attemptId).catch(() => null);
           if (stopped) return;
-          if (detail && detail.result !== "Calling…") {
+          if (detail && !["queued", "dialing", "ringing", "in_progress"].includes(detail.status)) {
             setResult(detail);
             setPhase("done");
             setLive(null);
@@ -126,13 +128,13 @@ function TestCall() {
           </button>
           <p className="flex items-start gap-2 text-xs text-haze">
             <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-cyanx" />
-            Numbers on the do-not-call list are never dialled. Only one test call runs at a time.
+            Calls end automatically at 2 minutes. Numbers on the do-not-call list are never dialled. One test call at a time.
           </p>
         </form>
 
         <div className="lg:col-span-3">
           {live ? (
-            <LiveCallCard live={live} />
+            <LiveCallCard live={live} limit={limit} />
           ) : phase === "dialing" ? (
             <div className="card flex flex-col items-center gap-4 p-12 text-center">
               <div className="flex h-16 w-16 items-center justify-center rounded-full bg-volt text-ink-950 animate-pulse-ring">
@@ -140,6 +142,11 @@ function TestCall() {
               </div>
               <p className="font-display text-xl font-semibold">Ringing {form.phone}…</p>
               <p className="text-sm text-haze">Pick up and talk. The conversation appears here as it happens.</p>
+              {attemptId && (
+                <button className="btn btn-danger" onClick={() => api.hangup(attemptId).catch(() => {})}>
+                  <PhoneOff className="h-4 w-4" /> Cancel call
+                </button>
+              )}
             </div>
           ) : result ? (
             <div className="card p-6">

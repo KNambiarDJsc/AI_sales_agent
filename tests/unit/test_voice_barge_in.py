@@ -80,3 +80,62 @@ async def test_vobiz_audio_runs_ahead_of_real_time_by_the_lead():
     await s._speak_phrases(phrases_from(["Hello there."]))  # 0.4 s of audio from LevelTTS
     elapsed = asyncio.get_event_loop().time() - t0
     assert tel.sent_frames and elapsed < 0.2  # all of it fits in the lead: no waiting
+
+
+class LimitEngine:
+    def __init__(self, limit):
+        self.limit = limit
+
+    def call_limit_seconds(self):
+        return self.limit
+
+    def time_up_line(self):
+        return "Sorry, I have to wrap up now."
+
+
+class HangupTelephony(Pcm16Telephony):
+    def __init__(self):
+        super().__init__()
+        self.hung_up = []
+
+    async def hangup_call(self, provider_call_id):
+        self.hung_up.append(provider_call_id)
+
+
+async def test_silence_hangs_up_but_speech_or_the_agent_talking_keeps_the_call():
+    # Live Vobiz call, 2026-10-22: the customer hung up, Vobiz kept the call open and the
+    # console showed it live until it was ended by hand. Nobody talking for
+    # silence_hangup_seconds now ends the call from our side.
+    tel = HangupTelephony()
+    s = _session(tel)
+    s._engine = LimitEngine(limit=600)
+    s._settings = s._settings.model_copy(update={"silence_hangup_seconds": 2})
+    loop = asyncio.get_event_loop()
+    s._last_activity = s._started_at = loop.time()
+    watch = asyncio.create_task(s._watch_call())
+    await asyncio.sleep(1.2)
+    await _feed(s, [(True, 5)])  # the customer says something
+    await asyncio.sleep(1.2)
+    assert tel.hung_up == [] and not s.ended
+    await _agent_talking(s)  # agent talking is activity too
+    await asyncio.sleep(2.5)
+    assert tel.hung_up == []
+    s._speaking_task.cancel()
+    await asyncio.wait_for(watch, 5)  # then silence: hung up and closed
+    assert len(tel.hung_up) == 1 and s.ended
+
+
+async def test_time_limit_says_goodbye_then_hangs_up_and_takes_no_more_turns():
+    # Owner's rule (2026-10-22): no call runs past 2 minutes.
+    tel = HangupTelephony()
+    s = _session(tel)
+    s._engine = LimitEngine(limit=120)
+    said = []
+    s._start_speaking = lambda text: said.append(text) or setattr(s, "_speaking_task", asyncio.create_task(asyncio.sleep(0.1)))
+    loop = asyncio.get_event_loop()
+    s._last_activity = loop.time()
+    s._started_at = loop.time() - 111  # 111 s in: past the 120 - 10 s wrap-up point
+    await asyncio.wait_for(s._watch_call(), 5)
+    assert said == ["Sorry, I have to wrap up now."]
+    assert len(tel.hung_up) == 1 and s.ended
+    await s._run_agent_turn("one more thing")  # ignored: no new reply after the goodbye

@@ -267,7 +267,13 @@ class Settings(BaseSettings):
     # --- Campaign defaults (client-confirmable; never assume silently in business logic) ---
     default_call_window_start: str = "09:00"
     default_call_window_end: str = "19:00"
-    default_max_call_duration_seconds: int = 420
+    # Hard cap on a call's length, also sent to the provider (Vobiz time_limit) so the
+    # line is cut there even if this server misses it. 2 minutes: the owner's rule
+    # (2026-10-22) — a call can't cost more than that.
+    default_max_call_duration_seconds: int = 120
+    # This many seconds before the cap the agent says the script's time_up_line and
+    # hangs up itself, instead of the provider cutting it off mid-sentence.
+    call_wrap_up_seconds: int = Field(default=10, ge=3, le=60)
     default_max_concurrent_calls: int = 3
     default_timezone: str = "Asia/Kolkata"
 
@@ -341,6 +347,10 @@ class Settings(BaseSettings):
     # (silence, noise, timeout), the agent proactively re-prompts instead of leaving
     # dead air on the line.
     max_consecutive_empty_turns: int = 2
+    # Hang up after this long with nobody talking (neither the customer nor the agent).
+    # A customer who hung up while the provider kept the call open (seen with Vobiz,
+    # 2026-10-22) otherwise leaves a silent call running and billing. 0 = off.
+    silence_hangup_seconds: int = Field(default=30, ge=0, le=600)
 
 
 @lru_cache

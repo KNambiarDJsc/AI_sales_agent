@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from uuid import UUID
@@ -145,6 +146,8 @@ class ConversationEngine:
         self._tools = tool_registry or get_default_registry()
         self._settings = get_settings()
         self._ack_index = -1  # rotation for acknowledgment()
+        if context.call_started_at is None:
+            context.call_started_at = time.monotonic()
 
     async def run_turn(
         self,
@@ -558,6 +561,14 @@ class ConversationEngine:
     @property
     def current_state(self) -> str:
         return self._state_machine.current_state
+
+    def call_limit_seconds(self) -> int:
+        """The call's hard length limit: the script's, never above the server's cap."""
+        return min(self._state_machine.script.max_call_duration_seconds, self._settings.default_max_call_duration_seconds)
+
+    def time_up_line(self) -> str:
+        """The script's line for running out of time, in the customer's language."""
+        return self._state_machine.script.time_up_line_for(self._state_machine.customer_language)
 
     def current_fallback_response(self) -> str:
         """Exposed for the voice session's silence/no-transcript re-prompt path

@@ -73,6 +73,8 @@ class ScriptConfig(BaseModel):
     sales_followup_states: list[str] = Field(default_factory=list)
     not_interested_states: list[str] = Field(default_factory=list)
     acknowledgments: dict[str, list[str]] = Field(default_factory=dict)
+    # Said when the call reaches its time limit (one line, or one per language).
+    time_up_line: str | dict[str, str] = ""
 
     def is_dnc_request(self, customer_text: str) -> bool:
         """Deterministic DNC detection from the script's configured phrases — see
@@ -117,16 +119,22 @@ class ScriptConfig(BaseModel):
             return ""
         return substitute_placeholders(text, fields)
 
+    def _in_language(self, text: str | dict[str, str], language: str | None) -> str:
+        if isinstance(text, dict):
+            default = self.language.split("-")[0]
+            text = text.get(language or default) or text.get(default) or next(iter(text.values()), "")
+        return text
+
     def fallback_for(self, state_name: str, fields: dict | None = None, language: str | None = None) -> str:
         """The state's configured fallback line, in `language` (base code, e.g. "hi")
         when the config has one per language; otherwise the script's default
         language, otherwise whichever is configured."""
         state = self.states.get(state_name)
         text = state.fallback_response if state else "Sorry, could you repeat that?"
-        if isinstance(text, dict):
-            default = self.language.split("-")[0]
-            text = text.get(language or default) or text.get(default) or next(iter(text.values()), "")
-        return substitute_placeholders(text, fields or {})
+        return substitute_placeholders(self._in_language(text, language), fields or {})
+
+    def time_up_line_for(self, language: str | None = None) -> str:
+        return self._in_language(self.time_up_line, language)
 
 
 def load_script(path: str | Path) -> ScriptConfig:
@@ -147,6 +155,7 @@ def load_script(path: str | Path) -> ScriptConfig:
         sales_followup_states=raw.get("sales_followup_states") or [],
         not_interested_states=raw.get("not_interested_states") or [],
         acknowledgments=raw.get("acknowledgments") or {},
+        time_up_line=raw.get("time_up_line") or "",
     )
 
 

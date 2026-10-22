@@ -1,8 +1,8 @@
 "use client";
 
-import { useEffect, useRef } from "react";
-import { Bot, PhoneCall, User } from "lucide-react";
-import type { LiveCall as Live } from "@/lib/api";
+import { useEffect, useRef, useState } from "react";
+import { Bot, PhoneCall, PhoneOff, User } from "lucide-react";
+import { api, type LiveCall as Live } from "@/lib/api";
 import { EqBars } from "@/components/ui";
 
 const STATE_LABEL: Record<string, string> = {
@@ -26,13 +26,15 @@ function mmss(s: number) {
   return `${Math.floor(s / 60)}:${(s % 60).toString().padStart(2, "0")}`;
 }
 
-export function LiveCallCard({ live }: { live: Live }) {
+export function LiveCallCard({ live, limit = 120, onEnded }: { live: Live; limit?: number; onEnded?: () => void }) {
   const scroller = useRef<HTMLDivElement>(null);
+  const [ending, setEnding] = useState(false);
   useEffect(() => {
     scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: "smooth" });
   }, [live.lines.length]);
 
   const talking = live.status === "talking";
+  const left = Math.max(0, limit - live.seconds);
   return (
     <div className="card card-glow overflow-hidden">
       <div className="flex flex-wrap items-center gap-4 border-b border-white/5 p-5">
@@ -53,10 +55,34 @@ export function LiveCallCard({ live }: { live: Live }) {
           <p className="text-sm text-haze">{live.phone}</p>
         </div>
         <div className="text-right">
-          <p className="font-display text-3xl font-bold tabular-nums">{mmss(live.seconds)}</p>
+          <p className="font-display text-3xl font-bold tabular-nums">
+            {mmss(live.seconds)}
+            <span className="text-base font-medium text-haze"> / {mmss(limit)}</span>
+          </p>
+          <div className="mt-1 h-1 w-28 overflow-hidden rounded-full bg-white/10">
+            <div
+              className={`h-full rounded-full ${left <= 20 ? "bg-rose-500" : "bg-volt"}`}
+              style={{ width: `${Math.min(100, (live.seconds / limit) * 100)}%` }}
+            />
+          </div>
           <p className="text-xs font-medium text-hotpink">
             {talking ? STATE_LABEL[live.state ?? ""] ?? live.state ?? "Talking" : "Ringing…"}
           </p>
+          <button
+            className="btn btn-danger mt-2 px-3 py-1.5 text-xs"
+            disabled={ending}
+            onClick={async () => {
+              setEnding(true);
+              try {
+                await api.hangup(live.attempt_id);
+                onEnded?.();
+              } finally {
+                setEnding(false);
+              }
+            }}
+          >
+            <PhoneOff className="h-3.5 w-3.5" /> {ending ? "Ending…" : "End call"}
+          </button>
         </div>
       </div>
       <div ref={scroller} className="max-h-80 space-y-3 overflow-y-auto p-5">

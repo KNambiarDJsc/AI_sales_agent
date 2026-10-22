@@ -33,6 +33,9 @@ class ConversationContext:
     # me tomorrow at 8am" has no anchor date to resolve against, so schedule_callback's
     # requested_time can never be filled in correctly (caught via a client POC review).
     timezone: str = "UTC"
+    # time.monotonic() when the call connected — the prompt tells the model how much of
+    # the call's time limit is left. Set by ConversationEngine if the caller doesn't.
+    call_started_at: float | None = None
 
     def append_turn(self, speaker: str, text: str, state: str) -> None:
         self.history.append(ConversationTurn(speaker=speaker, text=text, state=state))

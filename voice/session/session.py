@@ -107,11 +107,17 @@ class VoiceSession:
         self._barged_in_this_utterance = False
         self._first_frame_sent_at: float | None = None  # set in _speak(); see _process_vad_frame
         self._ended = False
+        self._last_activity = 0.0  # loop time of the last speech from either side; see _watch_call
+        self._started_at = 0.0  # loop time the call connected; see _watch_call
+        self._wrapping_up = False  # time limit reached: saying goodbye, no more turns
 
     async def start(self) -> None:
         self._stt_stream = await self._stt_provider.start_stream()
         self._background.add(warm := asyncio.create_task(self._engine.warm_up()))
         warm.add_done_callback(self._background.discard)
+        self._last_activity = self._started_at = asyncio.get_event_loop().time()
+        self._background.add(watch := asyncio.create_task(self._watch_call()))
+        watch.add_done_callback(self._background.discard)
         self._prerecord_acknowledgments(delay_s=1.5)  # after the greeting has started
 
     def _prerecord_acknowledgments(self, delay_s: float = 0.0) -> None:
@@ -185,6 +191,51 @@ class VoiceSession:
             del self._pending_pcm16[:VAD_FRAME_BYTES_PCM16_16K]
             await self._process_vad_frame(frame)
 
+    async def _watch_call(self) -> None:
+        """Ends the call from our side when it must not go on:
+        - the time limit (engine.call_limit_seconds(), 2 minutes): call_wrap_up_seconds
+          before it the agent says the script's time_up_line and hangs up — the
+          provider's own time_limit would cut it off mid-sentence;
+        - settings.silence_hangup_seconds with nobody talking: the customer is gone
+          (hung up without the provider noticing — seen with Vobiz — or walked away)."""
+        loop = asyncio.get_event_loop()
+        silence_limit = self._settings.silence_hangup_seconds
+        wrap_up_at = self._engine.call_limit_seconds() - self._settings.call_wrap_up_seconds
+        while not self._ended:
+            await asyncio.sleep(1.0)
+            now = loop.time()
+            if now - self._started_at >= wrap_up_at:
+                logger.info("call_time_limit", extra={"call_id": self._identity.provider_call_id})
+                await self._end_from_our_side(goodbye=self._engine.time_up_line())
+                return
+            if self._agent_speaking():
+                self._last_activity = now
+                continue
+            if silence_limit and now - self._last_activity >= silence_limit:
+                logger.info("silence_hangup", extra={"call_id": self._identity.provider_call_id, "seconds": silence_limit})
+                await self._end_from_our_side()
+                return
+
+    async def _end_from_our_side(self, goodbye: str = "") -> None:
+        self._background.discard(asyncio.current_task())  # close() cancels background tasks — not this one
+        self._wrapping_up = True
+        if goodbye:
+            # Let the current sentence finish briefly, then say goodbye (bounded: the
+            # provider cuts the line at the limit anyway).
+            if self._agent_speaking():
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(asyncio.shield(self._speaking_task), 3.0)
+                if self._agent_speaking():
+                    await self._handle_barge_in()
+            self._start_speaking(goodbye)
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(asyncio.shield(self._speaking_task), self._settings.call_wrap_up_seconds - 1)
+        try:
+            await self._telephony.hangup_call(self._identity.provider_call_id)
+        except Exception:  # noqa: BLE001 - the session still ends; the route closes the stream
+            logger.exception("hangup_failed", extra={"call_id": self._identity.provider_call_id})
+        await self.close()
+
     def _agent_speaking(self) -> bool:
         return self._speaking_task is not None and not self._speaking_task.done()
 
@@ -192,6 +243,8 @@ class VoiceSession:
         # STT already received this audio (at its own rate) from handle_inbound_audio;
         # this frame is 16kHz purely for VAD/endpointing.
         is_speech = self._vad.is_speech(pcm16_frame, frame_ms=VAD_FRAME_MS)
+        if is_speech:
+            self._last_activity = asyncio.get_event_loop().time()
         event = self._turn_taker.feed(is_speech, VAD_FRAME_MS)
 
         if event == TurnEvent.SPEECH_STARTED:
@@ -337,6 +390,8 @@ class VoiceSession:
         await speech
 
     async def _run_agent_turn(self, customer_text: str) -> None:
+        if self._wrapping_up:
+            return  # out of time: the goodbye is already playing
         turn_start = asyncio.get_event_loop().time()
 
         async def on_speech_stream(phrases: AsyncIterator[str]) -> None:
