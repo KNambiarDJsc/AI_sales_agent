@@ -10,6 +10,14 @@ $log = Join-Path $env:LOCALAPPDATA "voiceagent-backend.log"
 $env:PYTHONIOENCODING = "utf-8"
 $env:PYTHONUNBUFFERED = "1"
 
+# The tunnel watchdog (scripts\tunnel_watchdog.ps1), once: replaces an expired tunnel.
+$running = Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" |
+    Where-Object { $_.CommandLine -like '*tunnel_watchdog.ps1*' }
+if (-not $running) {
+    Start-Process powershell -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$PSScriptRoot\tunnel_watchdog.ps1`"" -WindowStyle Hidden
+    Write-Host "Tunnel watchdog started (log: %LOCALAPPDATA%\voiceagent-watchdog.log)" -ForegroundColor Green
+}
+
 while ($true) {
     $pg = Join-Path $env:LOCALAPPDATA "voiceagent-pg"
     & "$pg\pgsql\bin\pg_isready.exe" -h localhost -p 55434 | Out-Null

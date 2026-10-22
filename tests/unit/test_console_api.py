@@ -34,6 +34,10 @@ class FakeTelephony:
         return self.live
 
 
+async def _reachable():
+    return True
+
+
 @pytest.fixture
 def console(monkeypatch):
     _drop_pool()
@@ -44,6 +48,7 @@ def console(monkeypatch):
     monkeypatch.setattr(s, "public_base_url", "https://agent.example.com")
     telephony = FakeTelephony()
     monkeypatch.setattr("apps.api.routers.console.get_telephony_provider", lambda name=None: telephony)
+    monkeypatch.setattr("apps.api.routers.console._public_url_reachable", _reachable)
     with TestClient(app) as client:
         token = client.post("/console/login", json={"username": "admin", "password": PASSWORD}).json()["token"]
         client.headers["Authorization"] = f"Bearer {token}"
@@ -185,3 +190,17 @@ def test_a_number_can_be_test_called_again_after_a_call_that_never_counted(conso
     resp = client.post("/console/calls/test", json={"phone": "9876543214"})
     assert resp.status_code == 200, resp.text
     assert len(telephony.calls) == 2
+
+
+
+@requires_db
+def test_a_dead_tunnel_refuses_the_test_call_with_a_clear_message(console, monkeypatch):
+    # Live, 2026-10-23: the free tunnel expired and Vobiz answered every call with
+    # "answer_url parameter is not valid".
+    async def unreachable():
+        return False
+    monkeypatch.setattr("apps.api.routers.console._public_url_reachable", unreachable)
+    client, telephony = console
+    resp = client.post("/console/calls/test", json={"phone": "9876543215"})
+    assert resp.status_code == 503 and "tunnel" in resp.json()["detail"]
+    assert telephony.calls == []

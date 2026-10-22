@@ -23,6 +23,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 
+import httpx
 import pandas as pd
 import phonenumbers
 from fastapi import APIRouter, Depends, HTTPException, Response, UploadFile
@@ -109,10 +110,36 @@ def _normalize_phone(raw: str) -> str:
     return phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164)
 
 
+_public_ok_until = 0.0
+
+
+async def _public_url_reachable() -> bool:
+    """Can the provider reach us at PUBLIC_BASE_URL? Free tunnels expire without
+    warning, and Vobiz then refuses every call ("answer_url parameter is not valid").
+    A good answer is trusted for 30 s."""
+    global _public_ok_until
+    if time.monotonic() < _public_ok_until:
+        return True
+    try:
+        async with httpx.AsyncClient(timeout=8) as client:
+            ok = (await client.get(f"{_public_base()}/health")).status_code == 200
+    except httpx.HTTPError:
+        ok = False
+    if ok:
+        _public_ok_until = time.monotonic() + 30
+    return ok
+
+
 async def _dispatch_one(session, campaign: Campaign) -> bool:
     base = _public_base()
     if not base.startswith("https://"):
         raise HTTPException(status_code=503, detail="Server has no public https URL (PUBLIC_BASE_URL) — start the tunnel")
+    if not await _public_url_reachable():
+        raise HTTPException(
+            status_code=503,
+            detail="The public tunnel is down, so the phone company can't reach this laptop. "
+                   "It is replaced automatically within about a minute — try again then.",
+        )
     return await dispatch_next_call(
         session, campaign, get_telephony_provider(campaign.telephony_provider),
         media_websocket_base_url=f"{base.replace('https://', 'wss://')}/media",
@@ -575,7 +602,8 @@ async def run_console_dialer() -> None:
                 await _reconcile_live_calls()
             async with session_scope() as session:
                 leads_c, _ = await _campaigns(session)
-                if leads_c.status == "active" and _public_base().startswith("https://"):
+                # Tunnel down: wait, rather than burn each lead's attempts on refused calls.
+                if leads_c.status == "active" and _public_base().startswith("https://")                         and await _public_url_reachable():
                     await _dispatch_one(session, leads_c)
         except asyncio.CancelledError:
             raise
