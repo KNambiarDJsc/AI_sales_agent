@@ -5,7 +5,8 @@ sheet to a qualified lead landing in Excel. For the rules every change must foll
 see `CLAUDE.md`; for what's real vs. placeholder see `STATUS.md`.
 
 **In one sentence:** you upload a list of leads, the AI agent phones them one by one,
-has a short natural conversation (English, Hindi or Hinglish), and marks each lead
+has a short natural conversation in a woman's voice with an Indian accent (Hindi first;
+Hinglish or English when the customer speaks it), and marks each lead
 *Interested*, *Callback requested*, *Not interested* or *Do not call* — the interested
 ones are handed to the human sales team.
 
@@ -61,7 +62,7 @@ sequenceDiagram
         VZ->>L: Phone rings
         L-->>VZ: Picks up
         VZ->>API: Open audio stream
-        API->>L: "Hello, am I speaking with Naman from Demo Business?" (instant)
+        API->>L: "नमस्ते, क्या मेरी बात Naman जी से हो रही है, Demo Business से?" (instant)
         loop each turn of the conversation
             L->>API: Speaks
             API->>AI: Transcribe, then propose a reply
@@ -86,7 +87,7 @@ Defined in `config/scripts/seller-flow.yaml` — change the flow there, not in P
 
 ```mermaid
 stateDiagram-v2
-    [*] --> INTRO: "Hello, am I speaking with {name} from {business}?"
+    [*] --> INTRO: "नमस्ते, क्या मेरी बात {name} जी से हो रही है, {business} से?"
     INTRO --> PITCH: confirmed → short personalized pitch
     INTRO --> CALLBACK: busy right now
     INTRO --> WRONG_NUMBER: wrong person / business
@@ -124,7 +125,7 @@ stateDiagram-v2
 
 What each step means in practice:
 
-- **Greeting + business confirmation** — a fixed opening line, played instantly (no AI wait).
+- **Greeting + business confirmation** — a fixed opening line in Hindi, played instantly (no AI wait).
 - **Pitch** — one or two sentences: we help businesses like yours (mentions their product
   category if the sheet has one) sell on Amazon / online; would you be interested?
 - **Intent detection** — "hmm", "okay" alone is *listening*, not a yes: the agent asks once more.
@@ -175,6 +176,16 @@ The agent's voice goes to Vobiz at the TTS's own 24 kHz, untouched
 (`VOBIZ_OUTBOUND_SAMPLE_RATE`). Converting it to 8 kHz ourselves made it harsh and
 hard to follow.
 
+**Language and voice** (client's choice, 2026-10-23):
+- Every call starts in **Hindi**. The agent replies in Hinglish or English only when the
+  customer clearly speaks it; a short "yes", "okay" or "hello" keeps Hindi, since Hindi
+  speakers say those too (`orchestrator/language.py`).
+- Hindi is always written in Devanagari for the voice; the transcriber is told to do the
+  same, which also made it hear Hinglish more accurately.
+- The voice is OpenAI's `coral`, a woman's voice told to speak with an Indian accent
+  (`OPENAI_TTS_VOICE`, `OPENAI_TTS_INSTRUCTIONS`). The prompt tells the agent she is a
+  woman, so her Hindi uses feminine forms ("मैं समझ गई", "बता सकती हूँ").
+
 Rule of the house: **the AI proposes, the app decides.** The model never directly
 changes a lead's result, never skips the script, never runs a tool that state doesn't
 allow, and "qualified" is computed from the facts it reports (`qualification/`), not
@@ -209,9 +220,13 @@ call (the states it reached, a booked callback, a DNC request):
 | **Do not call** | Asked never to be called — that number is never dialled again |
 | Unclear / No answer / Busy / Call failed | Self-explanatory |
 
-You see them on the **Dashboard**, the **Leads** list, **Call history** (with the full
-transcript of every call), and the **Excel export** (sheets: *All leads*, *Calls*,
-*Interested leads*).
+You see them on the **Dashboard**, the **Leads** list, **Call history**, and the **Excel
+export** (sheets: *All leads*, *Calls*, *Interested leads*).
+
+**Call history** lists every call: filter by result, search by name, business or phone.
+Click any call to read the whole conversation (agent on the left, customer on the right),
+then copy it or download it as a text file. Every line is saved as it is said
+(`transcript_segments` table), so even a call that drops halfway keeps what was said.
 
 ---
 
@@ -228,8 +243,8 @@ scripts\start_backend.cmd
 #    restart the backend after it)
 powershell -ExecutionPolicy Bypass -File scripts\start_tunnel.ps1
 
-# 3. The console
-cd web; npm run dev        # → http://localhost:3100
+# 3. The console, also in its own window → http://localhost:3100
+scripts\start_website.cmd
 ```
 
 Log in with the console account from `.env` (`CONSOLE_USERNAME` / `CONSOLE_PASSWORD`).
@@ -247,6 +262,8 @@ through your browser microphone — no phone call, no telephony cost.
 | Change general behavior (tone, name usage, language) | `config/prompts/system_prompt.yaml` |
 | Change what counts as "qualified" | `config/qualification/seller-flow.yaml` |
 | Change call length, silence timeout, models, login | `.env` (see `.env.example` for every option) |
+| Change the voice | `.env` → `OPENAI_TTS_VOICE` (a male voice also needs the "You are a woman" rule changed in `config/prompts/system_prompt.yaml`) |
+| Change which language calls start in | `config/scripts/seller-flow.yaml` → `language` and the INTRO `opening_line` |
 | Calling hours | Console → Settings |
 
 If a business change needs a `.py` edit, that's a bug — business logic lives in `config/`.

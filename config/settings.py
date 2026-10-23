@@ -66,12 +66,18 @@ class Settings(BaseSettings):
     # बेचते" → "में ही बेचते हैं"); gpt-transcribe ($0.0045/min) got it right.
     openai_stt_model: str = "gpt-transcribe"
     openai_tts_model: str = "gpt-4o-mini-tts"
-    openai_tts_voice: str = "alloy"
+    # A woman's voice with an Indian accent (client, 2026-10-23). Female voices measured
+    # on a short Hindi reply, first audio: coral 0.7-1.0 s, sage 0.7-0.8 s, nova
+    # 0.6-1.9 s, shimmer 1.2-2.3 s, marin 1.4-1.5 s. The prompt tells the LLM it is a
+    # woman (feminine Hindi forms) — keep a female voice here, or change that rule
+    # in config/prompts/system_prompt.yaml too.
+    openai_tts_voice: str = "coral"
     # gpt-4o-mini-tts speaking style. An Indian accent sounds natural to the leads and
     # handles the Hindi/Hinglish replies (language_policy: match_customer).
     openai_tts_instructions: str = (
-        "Speak like a warm, friendly Indian sales caller on the phone: natural Indian English accent, "
-        "conversational pace. When the text is Hindi, speak natural, fluent Hindi."
+        "Voice: a warm, friendly young Indian woman on a phone call. Accent: natural Indian, like a "
+        "Hindi speaker from North India; English words said the Indian way. Hindi: fluent, natural "
+        "everyday spoken Hindi, never bookish. Tone: polite, confident, smiling. Pace: natural and clear, not slow."
     )
     openai_llm_model: str = "gpt-4.1-mini"
     # Budget guard (see _refuse_expensive_models): a key funded for testing was emptied
@@ -94,8 +100,14 @@ class Settings(BaseSettings):
     stt_language: str = ""
     # Hints for the transcriber: expected languages (live model) and the setting —
     # context measurably helps code-switched speech.
-    stt_languages: str = "en,hi"
-    stt_prompt: str = "A sales phone call in India. The customer may speak English, Hindi or Hinglish (a mix of both)."
+    stt_languages: str = "hi,en"
+    # "Write Hindi words in Devanagari": on the Hinglish test clip it also fixed "नहीं
+    # बेचते" heard as "में ही बेचते" (the opposite meaning), and Devanagari input keeps the
+    # replies in Devanagari, which the voice pronounces properly.
+    stt_prompt: str = (
+        "A sales phone call in India. The customer may speak Hindi, Hinglish (a mix of Hindi and English) "
+        "or English. Write Hindi words in Devanagari and English words in English letters."
+    )
     # Streaming ("realtime") STT model and its latency/accuracy trade-off
     # (minimal|low|medium|high|xhigh — OpenAI realtime-transcription guide).
     openai_realtime_stt_model: str = "gpt-live-transcribe"

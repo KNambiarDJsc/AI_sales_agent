@@ -213,7 +213,7 @@ async def test_dnc_backstop_answers_a_hindi_request_in_hindi(monkeypatch):
     result, spoken = await _run(engine, "दोबारा कॉल मत करना, मेरा नंबर हटा दो।")
     await asyncio.sleep(0.05)
     assert result.new_state == "DO_NOT_CALL" and result.end_call is True
-    assert spoken == ["समझ गया — हम आपको दोबारा कॉल नहीं करेंगे। परेशानी के लिए माफ़ी।"]
+    assert spoken == ["समझ गई — हम आपको दोबारा कॉल नहीं करेंगे। परेशानी के लिए माफ़ी।"]
 
 
 def test_fallback_lines_follow_the_customers_language():
@@ -380,3 +380,27 @@ async def test_invalid_llm_output_keeps_state_and_speaks_the_fallback(monkeypatc
     assert result.used_fallback is True
     assert result.new_state == "INTRO"
     assert len(spoken) == 1
+
+
+async def test_end_while_still_asking_keeps_the_state_so_the_answer_can_be_booked(monkeypatch):
+    # gpt-4.1-mini proposed END from INTERESTED while asking for a day and time; END
+    # allows no tools, so the time the customer gave next could never be booked.
+    from orchestrator.state_machine import load_script_by_id
+
+    _patch_session_scope(monkeypatch, [])
+    llm = FakeNonStreamingLLM(_valid_payload(state="END", speech="आपको कब कॉल करना सही रहेगा?"))
+    engine = ConversationEngine(llm, StateMachine(load_script_by_id("seller-flow"), "INTERESTED"), _context(),
+                                tool_registry=ToolRegistry())
+    result, _ = await _run(engine, "ठीक है, specialist से बात करवा दीजिए।")
+    assert result.new_state == "INTERESTED" and result.end_call is False
+
+
+async def test_reaching_end_without_a_question_hangs_up(monkeypatch):
+    from orchestrator.state_machine import load_script_by_id
+
+    _patch_session_scope(monkeypatch, [])
+    llm = FakeNonStreamingLLM(_valid_payload(state="END", speech="धन्यवाद, आपका दिन शुभ हो।"))
+    engine = ConversationEngine(llm, StateMachine(load_script_by_id("seller-flow"), "NOT_INTERESTED"), _context(),
+                                tool_registry=ToolRegistry())
+    result, _ = await _run(engine, "Thanks, bye.")
+    assert result.new_state == "END" and result.end_call is True

@@ -6,7 +6,6 @@ together what config/prompts and config/scripts already say.
 from __future__ import annotations
 
 import json
-import re
 import time
 from datetime import datetime
 from functools import lru_cache
@@ -17,6 +16,7 @@ import yaml
 
 from config.settings import PROMPTS_DIR, REPO_ROOT, get_settings
 from llm.base import LLMMessage
+from orchestrator import language
 from orchestrator.context import ConversationContext
 from orchestrator.state_machine import ScriptConfig, substitute_placeholders
 from qualification.rules import load_rules
@@ -83,9 +83,11 @@ def _language_instruction(script: ScriptConfig) -> str:
     )
     if with_hindi and with_english:
         text += (
-            ", and Hinglish (the Hindi–English mix people in India speak). Look only at the customer's latest "
+            ", and Hinglish (the Hindi–English mix people in India speak). Look at the customer's latest "
             "message: if it is English, reply in English (an Indian name like the customer's is not Hindi). "
-            "Hindi → reply in simple, everyday spoken Hindi. Hinglish → reply in natural Hinglish. "
+            "A short 'yes', 'okay', 'sure' or 'hello' alone is not a switch to English — Hindi speakers say those "
+            "too — so keep the language you were speaking. Hindi → reply in simple, everyday spoken Hindi, the way "
+            "people talk on the phone (never formal or bookish Hindi). Hinglish → reply in natural Hinglish. "
             "Switch as soon as they switch, and back again if they switch back; a single English word like "
             "'Amazon' or 'online' inside a Hindi sentence is still Hindi. Write every Hindi word in Devanagari "
             "script (बहुत बढ़िया, आप क्या बेचते हैं?) — never romanized Hindi — so it is pronounced correctly; "
@@ -94,9 +96,6 @@ def _language_instruction(script: ScriptConfig) -> str:
     else:
         text += ". Switch as soon as the customer switches."
     return text + " Never speak any other language."
-
-
-_DEVANAGARI = re.compile(r"[ऀ-ॿ]")
 
 
 def _time_left_text(script: ScriptConfig, context: ConversationContext) -> list[str]:
@@ -113,31 +112,34 @@ def _time_left_text(script: ScriptConfig, context: ConversationContext) -> list[
     return [text]
 
 
-# Common Hindi words as they come out of English-letter transcription — enough to
-# tell Hinglish from English; an English sentence contains none of them.
-_ROMAN_HINDI_WORDS = frozenset(
-    "haan haa han nahi nahin nai kya kyun kyon kaise kaisa kitna kitne kitni hai hain tha thi ho hoon hu "
-    "mujhe mujhko humein hume hum aap aapka aapki mera meri mere hamara apna bhai ji theek thik achha acha "
-    "accha bolo boliye bataiye batao karna karo karenge karunga chahiye chahte abhi baad kal parso subah "
-    "shaam raat dopahar paisa paise rupay rupaye bhej bhejo bhejiye matlab samjha samajh dobara mat lekin "
-    "aur zaroor zarur bilkul kuch koi sab bahut bohot wala wali baat phir fir yaar arre arey".split()
-)
-
-
-def _reply_language_hint(script: ScriptConfig, customer_text: str) -> str:
-    """Which language this reply should be in, read off the customer's latest line —
-    with match_customer and Hindi + English. Without it the model drifted: a Hindi
-    reply to a plain English line, English replies to romanized Hinglish."""
+def _reply_language_hint(script: ScriptConfig, customer_lines: list[str]) -> str:
+    """Which language this reply should be in — with match_customer and Hindi +
+    English — from the customer's latest line that shows one (orchestrator/language.py);
+    until they clearly speak one, the script's `language`. Without it the model
+    drifted: a Hindi reply to a plain English line, English replies to romanized
+    Hinglish."""
     codes = {code.split("-")[0] for code in (script.supported_languages or [script.language])}
     if script.language_policy != "match_customer" or not {"hi", "en"} <= codes:
         return ""
-    if _DEVANAGARI.search(customer_text):
-        return "Reply language: the customer's latest message is in Hindi/Hinglish, so reply in Hindi/Hinglish."
-    if set(re.findall(r"[a-z]+", customer_text.lower())) & _ROMAN_HINDI_WORDS:
-        return "Reply language: the customer is speaking Hinglish (Hindi in English letters), so reply in Hinglish."
-    # Leaving English-vs-Hinglish to the model: a Hinglish reply to "No, I'm not sure"
-    # in a simulated call.
-    return "Reply language: the customer's latest message is English, so reply in English."
+    found = language.detect(customer_lines[-1]) if customer_lines else None
+    if found == language.HINDI:
+        return "Reply language: the customer is speaking Hindi, so reply in simple, everyday spoken Hindi."
+    if found == language.HINGLISH:
+        # Asked for "Hinglish", the model mirrored the customer's English letters ("main
+        # aapko call kar rahi hoon"), which the voice mispronounces. Spoken, Devanagari
+        # Hinglish sounds the same.
+        return ("Reply language: the customer is speaking Hinglish (the transcriber wrote their Hindi in "
+                "English letters). Reply in Hinglish, but write every Hindi word in Devanagari and keep English "
+                "words in English letters — \"हम आपकी help करेंगे\", never \"hum aapki help karenge\".")
+    if found == language.ENGLISH:
+        # The call starts in Hindi; a softer hint still got Hindi replies to English lines.
+        return ("Reply language: the customer's latest message is English, so this whole reply must be in "
+                "English, even though the call started in Hindi.")
+    earlier = language.latest(customer_lines[:-1])
+    name = {language.HINDI: "Hindi", language.HINGLISH: "Hinglish", language.ENGLISH: "English"}.get(
+        earlier, _LANGUAGE_NAMES.get(script.language, script.language))
+    return (f"Reply language: the customer's latest message is too short to show a language, so keep "
+            f"replying in {name}.")
 
 
 def _knowledge_lines(campaign_prompt: dict) -> list[str]:
@@ -212,11 +214,11 @@ def _turn_context_text(script: ScriptConfig, context: ConversationContext) -> st
         "clearly met): " + ", ".join(sorted(script.allowed_next_states(context.current_state))),
     ]
     customer_just_spoke = bool(context.history) and context.history[-1].speaker == "customer"
+    language_hint = ""
     if customer_just_spoke:
         parts.append(_transitions_text(script, context.current_state))
-        language_hint = _reply_language_hint(script, context.history[-1].text)
-        if language_hint:
-            parts.append(language_hint)
+        language_hint = _reply_language_hint(
+            script, [t.text for t in context.history if t.speaker == "customer"])
     else:
         parts.append(
             "The customer hasn't said anything yet this turn: speak first, working on this state's objective. "
@@ -233,6 +235,10 @@ def _turn_context_text(script: ScriptConfig, context: ConversationContext) -> st
     if context.extracted_facts:
         parts.append(f"Facts captured so far: {json.dumps(context.extracted_facts, ensure_ascii=False)}")
     parts.append(_tools_block(allowed_tools))
+    # Last, right before the customer's line: in the middle of this block it was
+    # ignored — Hindi replies to "No, not interested." in a Hindi-first call.
+    if language_hint:
+        parts.append(language_hint)
     return "\n".join(parts)
 
 

@@ -37,6 +37,7 @@ export interface CallRow {
   callback_time: string;
   summary: string;
   campaign: string;
+  transcript_lines?: number; // list endpoint only
 }
 
 export interface CallDetail extends CallRow {

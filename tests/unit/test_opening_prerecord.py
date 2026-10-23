@@ -17,7 +17,7 @@ async def test_opening_is_recorded_during_ringing_and_played_without_synthesis(m
     monkeypatch.setattr(opening, "get_tts_provider", lambda: tts)
     opening.prerecord_opening("seller-flow", opening.lead_fields("Naman", "Demo Business", {}))
     await asyncio.gather(*opening._tasks)
-    text = "Hello, am I speaking with Naman from Demo Business?"
+    text = "नमस्ते, क्या मेरी बात Naman जी से हो रही है, Demo Business से?"
     assert acknowledgments.cached(tts, text) is not None
 
     synthesized = []

@@ -1,6 +1,6 @@
 """Record a lead's scripted opening line while their phone is still ringing.
 
-Synthesizing "Hello, am I speaking with {name} from {business}?" only after pickup
+Synthesizing the greeting ("नमस्ते, क्या मेरी बात {name} जी से…") only after pickup
 left ~1.5-2 s of silence on a live Vobiz call — long enough for people to say "hello?"
 twice or hang up. Ringing takes several seconds, so the line is recorded then
 (acknowledgments.prerecord_one_off) and `VoiceSession` plays the recording at once.

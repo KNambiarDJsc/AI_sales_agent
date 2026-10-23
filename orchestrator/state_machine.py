@@ -16,12 +16,12 @@ import yaml
 from pydantic import BaseModel, Field
 
 from config.settings import SCRIPTS_DIR
+from orchestrator import language
 
 # States reachable from anywhere as a safety valve, regardless of the script's own
 # transitions_on — DNC and a hard end must never be a dead end the script forgot to
 # wire up (Section 10: DNC enforcement is not optional/LLM-controlled).
 GLOBAL_SAFETY_STATES = {"DO_NOT_CALL", "END"}
-_DEVANAGARI = re.compile(r"[\u0900-\u097F]")
 
 
 class _SafeFormatDict(dict):
@@ -199,11 +199,14 @@ class StateMachine:
     def note_customer_text(self, text: str) -> None:
         """Track the language the customer is speaking, so the application's own
         fixed lines (fallbacks, the DNC backstop) match it. Only with
-        language_policy match_customer: STT writes Hindi and Hinglish speech in
-        Devanagari, so Devanagari means Hindi; otherwise the script's default."""
-        if self.script.language_policy != "match_customer" or not text.strip():
+        language_policy match_customer. Hindi and Hinglish both get the "hi" lines; a
+        line too short to tell ("yes", "okay") keeps the language already in use
+        (orchestrator/language.py)."""
+        if self.script.language_policy != "match_customer":
             return
-        self.customer_language = "hi" if _DEVANAGARI.search(text) else self.script.language.split("-")[0]
+        found = language.detect(text)
+        if found:
+            self.customer_language = "en" if found == language.ENGLISH else "hi"
 
     def opening_line(self, fields: dict | None = None) -> str | None:
         """The current state's scripted opening, or None if there is none or a lead

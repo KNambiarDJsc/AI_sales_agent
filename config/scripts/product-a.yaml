@@ -142,7 +142,7 @@ states:
     allowed_tools: [update_lead, end_call]
     fallback_response:
       en: "Understood, thank you for your time."
-      hi: "समझ गया, आपके समय के लिए धन्यवाद।"
+      hi: "समझ गई, आपके समय के लिए धन्यवाद।"
     transitions_on:
       done: END
 
@@ -152,7 +152,7 @@ states:
     allowed_tools: [mark_dnc, end_call]
     fallback_response:
       en: "Understood — we won't call again. Apologies for the disturbance."
-      hi: "समझ गया — हम आपको दोबारा कॉल नहीं करेंगे। परेशानी के लिए माफ़ी।"
+      hi: "समझ गई — हम आपको दोबारा कॉल नहीं करेंगे। परेशानी के लिए माफ़ी।"
     transitions_on:
       done: END
 

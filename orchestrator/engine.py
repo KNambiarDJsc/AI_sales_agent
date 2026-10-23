@@ -245,6 +245,18 @@ class ConversationEngine:
                 # KeyError for it — which turned every failed tool call into a crashed turn.
                 logger.warning("tool_call_failed", extra={"tool": proposal.tool_call.name, "tool_message": result.message})
 
+        # END is the end of the conversation: the call hangs up after this reply — unless
+        # the reply still asks the customer something. gpt-4.1-mini proposed END from
+        # INTERESTED while asking "which day and time suits you?"; in END no tool is
+        # allowed, so the time they then gave could never be booked. The state stays put.
+        if proposal.state == "END" and not end_call:
+            if "?" in proposal.speech:
+                logger.warning("end_state_refused_question_pending",
+                               extra={"from_state": self._state_machine.current_state})
+                proposal = proposal.model_copy(update={"state": self._state_machine.current_state})
+            else:
+                end_call = True
+
         # The LLM proposes hanging up; the application decides. A call only ends from
         # a closing state (script config: END, DO_NOT_CALL, or a state whose only exit
         # is END) — or when DNC was just recorded. Caught with small local models,

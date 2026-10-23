@@ -47,7 +47,7 @@ objection_playbook:
   timing: "If now isn't the right time, ask when would be better and move to a callback."
   other: "Ask one short question to understand it; if you can't answer from verified knowledge, offer the specialist callback."
 
-language: "en-IN"
+language: "hi-IN"
 
 call_disclosure: >
   PLACEHOLDER — see config/prompts/system_prompt.yaml:identity_disclosure. Must match.

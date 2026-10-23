@@ -18,11 +18,13 @@
 
 script_id: seller-flow
 version: 1
-language: en-IN
-# Start in English; reply in the language the customer speaks (English / Hindi /
-# Hinglish) — requested by the project owner 2026-10-22.
+language: hi-IN
+# Start in Hindi (client's request, 2026-10-23: Hindi first, then Hinglish, then English);
+# reply in Hinglish or English when the customer clearly speaks it — a short "yes" or
+# "okay" alone keeps Hindi (orchestrator/language.py). Earlier: English first, owner
+# 2026-10-22.
 language_policy: match_customer
-supported_languages: [en-IN, hi-IN]
+supported_languages: [hi-IN, en-IN]
 
 campaign:
   objective: "Onboard sellers onto Amazon / online selling — qualify and hand interested sellers to the sales team"
@@ -36,7 +38,8 @@ states:
       like theirs sell on Amazon and online (mention their product category if the lead info has
       one), then ask if they would be interested. If it's the wrong person or business, apologize
       and close. If they are busy right now, ask when to call back.
-    opening_line: "Hello, am I speaking with {contact_name} from {business_name}?"
+    # Hindi first (client, 2026-10-23). PLACEHOLDER wording.
+    opening_line: "नमस्ते, क्या मेरी बात {contact_name} जी से हो रही है, {business_name} से?"
     mandatory_questions:
       - "Confirm you're speaking with {contact_name} from {business_name}."
     allowed_tools: [update_lead, end_call]
@@ -138,7 +141,7 @@ states:
     allowed_tools: [update_lead, end_call]
     fallback_response:
       en: "Sorry, I didn't quite get that. Could you say that again?"
-      hi: "माफ़ कीजिए, मैं ठीक से समझ नहीं पाया। क्या आप दोबारा बता सकते हैं?"
+      hi: "माफ़ कीजिए, मैं ठीक से समझ नहीं पाई। क्या आप दोबारा बता सकते हैं?"
     transitions_on:
       interested: INTERESTED
       not_interested_or_objection: OBJECTION_HANDLING
@@ -162,7 +165,7 @@ states:
     allowed_tools: [update_lead, end_call]
     fallback_response:
       en: "Understood, thank you for your time."
-      hi: "समझ गया, आपके समय के लिए धन्यवाद।"
+      hi: "समझ गई, आपके समय के लिए धन्यवाद।"
     transitions_on:
       done: END
 
@@ -171,7 +174,7 @@ states:
     allowed_tools: [mark_dnc, end_call]
     fallback_response:
       en: "Understood, we won't call again. Sorry for the disturbance."
-      hi: "समझ गया, हम आपको दोबारा कॉल नहीं करेंगे। परेशानी के लिए माफ़ी।"
+      hi: "समझ गई, हम आपको दोबारा कॉल नहीं करेंगे। परेशानी के लिए माफ़ी।"
     transitions_on:
       done: END
 

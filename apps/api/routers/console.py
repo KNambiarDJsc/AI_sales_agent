@@ -447,7 +447,8 @@ async def test_call(body: TestCall) -> dict:
 @router.get("/calls", dependencies=[Depends(require_console)])
 async def list_calls(limit: int = 100) -> list[dict]:
     rows = await _console_rows()
-    return [_row_dict(r) for r in reversed(rows[-limit:])]
+    # transcript_lines: lets Call history show which calls have a conversation to read.
+    return [{**_row_dict(r), "transcript_lines": len(r.transcript.splitlines())} for r in reversed(rows[-limit:])]
 
 
 @router.get("/calls/{attempt_id}", dependencies=[Depends(require_console)])

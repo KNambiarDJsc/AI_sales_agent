@@ -1,8 +1,42 @@
 # Status
 
-Last updated: 2026-10-22 (client console + client conversation flow). Read this before adding anything —
-it tracks what's real vs. placeholder, and what happens when client materials (code,
-prompts, scripts, credentials, models) arrive.
+Last updated: 2026-10-23 (client feedback: female Indian voice, Hindi first, call transcripts). Read
+this before adding anything — it tracks what's real vs. placeholder, and what happens when client
+materials (code, prompts, scripts, credentials, models) arrive.
+
+## Client feedback after the demo (2026-10-23)
+
+The client asked for (1) a woman's voice with an Indian accent, Hindi first, then Hinglish and
+English; (2) every call's transcript visible from call history.
+
+- **Voice:** `OPENAI_TTS_VOICE=coral` with Indian-woman speaking instructions. Female voices measured
+  on a short Hindi reply (time to first audio): coral 0.7–1.0 s, sage 0.7–0.8 s, nova 0.6–1.9 s,
+  shimmer 1.2–2.3 s, marin 1.4–1.5 s. Coral was picked for warmth and speed; another voice is a
+  one-line `.env` change.
+- **She speaks as a woman:** a rule in `config/prompts/system_prompt.yaml` sets feminine Hindi forms.
+  The fixed Hindi lines in both scripts were changed from समझ गया / पाया to समझ गई / पाई.
+- **Hindi first:**
+  - `config/scripts/seller-flow.yaml` now has `language: hi-IN` and a Hindi opening line.
+    The wording is ours: PLACEHOLDER until the client confirms it.
+  - `orchestrator/language.py` decides the reply language from the customer's latest *clear*
+    line. A short "yes" or "okay" keeps the current language.
+  - The reply-language hint now sits last in the per-turn instructions. In the middle, it was
+    ignored: Hindi replies to "No, not interested."
+- **Transcriber:** now told to write Hindi in Devanagari. On the Hinglish test clip this also
+  fixed "नहीं बेचते" being heard as "में ही बेचते", the opposite meaning.
+- **Bug fixed:** the model sometimes moved to END while still asking for a callback time.
+  END allows no tools, so the time could never be booked. The engine now keeps the state when an
+  END reply asks a question, and hangs up when END doesn't.
+- **Call history:**
+  - Result filters with counts, search, and a fully clickable row.
+  - A "View · N lines" transcript button on every row.
+  - The call page labels who is speaking and can copy or download the transcript (.txt).
+- `scripts\start_website.cmd` opens the console website in its own window, like
+  `start_backend.cmd`.
+- **Simulated conversations with gpt-4.1-mini:** Hindi, English and Hinglish flows all reached the
+  right outcome, with first phrase in ~1.0 s. Hinglish typed in English letters still sometimes
+  gets an English-letters reply. On real calls the transcriber writes spoken Hinglish in
+  Devanagari, so this path is rare.
 
 ## Call quality fixes after a live Vobiz test (2026-10-22, evening)
 
