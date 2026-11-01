@@ -6,7 +6,7 @@ A Python/FastAPI prototype for configurable, voice-based lead qualification. The
 
 - A push-to-talk browser demo at `/demo`, using the same conversation engine, state machine, tool registry, and qualification flow as the call path.
 - Structured LLM proposals that are checked against a response schema and the current script state before they can advance the conversation.
-- Typed tools with per-state authorization and validated arguments. Tool handlers receive tenant, campaign, lead, and conversation context rather than unrestricted database, shell, or HTTP access.
+- Typed tools are authorized by the active script state, and their arguments are validated. Handlers receive an explicit tenant, campaign, lead, and conversation context; the core registry exposes no free-form shell or arbitrary HTTP tool.
 - Configurable scripts and qualification rules.
 - OpenAI speech/model providers with local fallback options when configured.
 - OpenTelemetry tracing setup, with OTLP export enabled when an endpoint is configured.
