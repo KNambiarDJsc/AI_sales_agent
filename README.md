@@ -1,70 +1,53 @@
-# voice-sales-agent
+# Voice Sales Agent
 
-AI outbound voice sales qualification system. Built for a 4–5 day MVP, structured so
-client-specific scripts, qualification rules, prompts, telephony provider and any
-existing client code/models can be swapped in later without touching the core engine.
+A Python/FastAPI prototype for configurable, voice-based lead qualification. The project pairs a browser voice demo with a stateful conversation engine and explicit validation around tool actions.
 
-## Status (see `STATUS.md`)
+## What it demonstrates
 
-This is the **initial scaffold**: the architectural skeleton, interfaces, database schema,
-config system, and the first vertical slice wiring are in place. No client script, no
-client qualification rules, no client credentials, and no client code have been provided
-yet — those are stubbed as clearly-marked placeholders (`config/scripts/product-a.yaml`,
-`config/qualification/rules.yaml`, `.env.example`). **Do not treat any placeholder text as
-the real script — it exists only so the pipeline runs end-to-end.**
+- A push-to-talk browser demo at `/demo`, using the same conversation engine, state machine, tool registry, and qualification flow as the call path.
+- Structured LLM proposals that are checked against a response schema and the current script state before they can advance the conversation.
+- Typed tools with per-state authorization and validated arguments. Tool handlers receive tenant, campaign, lead, and conversation context rather than unrestricted database, shell, or HTTP access.
+- Configurable scripts and qualification rules.
+- OpenAI speech/model providers with local fallback options when configured.
+- OpenTelemetry tracing setup, with OTLP export enabled when an endpoint is configured.
 
-Read `STATUS.md` before adding anything — it tracks what's real, what's a stub, and the
-next steps in priority order. When client materials (code, prompts, scripts, credentials)
-arrive, they get audited against `STATUS.md`'s KEEP/REFACTOR/REPLACE/ADD plan — see
-`CLAUDE.md` at the repo root for the standing rule.
+## Demo and verification
 
-## Layout
+The dated [development status notes](STATUS.md) record an end-to-end browser-demo check against the backend and live OpenAI adapter smoke tests. These are project development checks, not an independent audit.
 
-See `CLAUDE.md` for the full directory map and architectural rules (media layer vs.
-orchestration layer, provider abstractions, tool authorization boundary, etc). Short version:
+**A real phone call has not been verified.** The browser demo avoids carrier setup and is not evidence of production telephony. The bundled Product A script and qualification rules are illustrative placeholders; replace them with approved client-specific material before use.
 
-```
-apps/api/            FastAPI app: campaign/lead/webhook endpoints
-services/             campaign, lead_import, call_worker domain logic
-voice/                realtime media: session, audio, VAD, turn-taking (NOT wired to a
-                       real telephony stream yet — see STATUS.md)
-telephony/            TelephonyProvider + FreJun (Teler)/Exotel/Twilio adapters
-speech/               STTProvider / TTSProvider + OpenAI adapters
-llm/                  LLM provider abstraction + OpenAI adapter
-orchestrator/         state machine, prompt assembly, LLM-output validator
-tools/                typed internal tool registry (dnc, callback, qualification, ...)
-qualification/        config-driven scoring/rules engine
-database/             SQLAlchemy models, repositories, Alembic migrations
-workers/              call worker loop, retry, export
-observability/        tracing + structured logging setup
-config/               prompts/, scripts/, qualification/ — versioned, non-code business logic
-evaluation/           persona definitions for scripted test calls
-tests/                unit/integration/contract/adversarial
-```
+## Run locally
 
-## Setup
+Requirements: Python, Docker Compose, and an OpenAI API key for the hosted speech/model path. Local models can be configured separately.
 
-```bash
-python -m venv .venv
-. .venv/Scripts/activate          # Windows
-pip install -r requirements.txt
-cp .env.example .env              # fill in secrets before running anything real
-docker compose up -d db           # Postgres for local dev
+```powershell
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+Copy-Item .env.example .env
+# Set OPENAI_API_KEY in .env, then start the database and app.
+docker compose up -d db
 alembic upgrade head
 uvicorn apps.api.main:app --reload
 ```
 
-## What is NOT real yet
+Open `http://127.0.0.1:8000/demo` and allow microphone access to try the browser flow.
 
-- FreJun (Teler) is the active telephony provider (`telephony/frejun.py`, built from
-  FreJun's official docs/SDK). A real call needs a Teler number attached to a Voice
-  App — see `STATUS.md` and `python scripts/frejun_call.py check`.
-- No client sales script / qualification thresholds — `config/scripts/product-a.yaml` and
-  `config/qualification/rules.yaml` are illustrative placeholders for the Amazon-selling
-  qualification use case, marked `PLACEHOLDER — replace with client script`.
-- The realtime audio path (`voice/`) has the session/VAD/turn-taking abstractions and an
-  Exotel/Twilio-shaped WebSocket media handler, but has not been run against a live call.
-- OpenAI STT/TTS/LLM adapters are written against the documented SDK surface but not yet
-  smoke-tested with a real API key in this environment.
+For local speech/model fallback setup, see `requirements-local.txt`, `scripts/setup_local_models.py`, and `.env.example`. For configuration and dated implementation notes, see [STATUS.md](STATUS.md) and [CLAUDE.md](CLAUDE.md).
 
-None of this is faked to look done — see `STATUS.md` for the exact KEEP/REFACTOR/ADD list.
+## Main components
+
+- `apps/api/` — FastAPI routes, including the browser demo.
+- `orchestrator/` — conversation state, prompts, streaming, and response validation.
+- `tools/` — typed, state-authorized actions.
+- `speech/` and `llm/` — provider interfaces and implementations.
+- `telephony/` — carrier-facing code; live calling remains unverified.
+- `observability/` — logging and tracing setup.
+- `database/` — SQLAlchemy models, repositories, and migrations.
+
+## Scope and limitations
+
+This is a prototype and engineering project, not a production-ready calling service, compliance certification, or guarantee of sales results. Do not use the example script, thresholds, or credentials for real campaigns without replacing and reviewing them. Validate the carrier, legal, privacy, and consent requirements for each deployment.
+
+Related work: [OpenMHS](https://github.com/KNambiarDJsc/Open-MHS) explores scoped, auditable actions against simulated devices; no physical hardware has been validated. [Meridian](https://www.meridianhq.in/) is a separate repository-assessment product and does not provide legal advice.
