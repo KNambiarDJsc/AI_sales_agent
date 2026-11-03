@@ -1,5 +1,7 @@
 """Picks the STT provider from settings.ai_backend / settings.stt_backend.
 
+- a Sarvam key set (and ai_backend not "local"): Sarvam's Hindi/Hinglish streaming
+  model, falling back to OpenAI REST if Sarvam can't connect or drops mid-call.
 - ai_backend "openai": OpenAI only — `stt_backend` chooses REST ("buffered") or the
   Realtime API ("realtime").
 - ai_backend "local": Moonshine only.
@@ -19,6 +21,10 @@ from speech.stt.base import STTProvider
 def get_stt_provider(backend: str | None = None) -> STTProvider:
     s = get_settings()
     mode = s.ai_backend
+    if s.sarvam_api_key and mode != "local" and backend is None:
+        from speech.stt.sarvam import SarvamWithFallbackSTTProvider
+
+        return SarvamWithFallbackSTTProvider()
     if mode == "local":
         from speech.stt.moonshine_local import MoonshineSTTProvider
 

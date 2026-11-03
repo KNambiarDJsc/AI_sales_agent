@@ -350,25 +350,38 @@ class ConversationEngine:
         return TurnResult(speech=speech, end_call=True, new_state="DO_NOT_CALL", tool_result_summary=result.message)
 
     def _is_local_dnc_guess(self, proposal: AgentResponseProposal) -> bool:
-        """A local model proposing do-not-call. A real DNC request in the customer's
-        words never reaches the LLM — the configured-phrase backstop handles it first —
-        so a local model proposing DNC is guessing, and small local models guessed
-        wrong: they put a customer who had just said "please have your sales team call
-        me" (and one who only confirmed their name) on do-not-call. Suppressing a lead
-        is irreversible in practice, so the guess is refused (OpenAI models' DNC
-        judgement is still honoured)."""
-        if getattr(self._llm, "backend", "openai") != "local":
-            return False
-        return proposal.state == "DO_NOT_CALL" or (
+        """A do-not-call proposal the application doesn't trust. A real DNC request in
+        the customer's words never reaches the LLM — the configured-phrase backstop
+        handles it first — so a DNC proposal is the model's judgement, refused when:
+        - it comes from a local model: small local models put a customer who had just
+          said "please have your sales team call me" (and one who only confirmed their
+          name) on do-not-call;
+        - the customer's message is shorter than the script's `dnc_min_words`: a live
+          Vobiz call (2026-10-31) was put on do-not-call because the transcriber heard
+          the customer's greeting as the single word "मत" ("don't").
+        Suppressing a lead is irreversible in practice, so the guess is refused (an
+        OpenAI model's DNC judgement on a real sentence is still honoured)."""
+        if not (proposal.state == "DO_NOT_CALL" or (
             proposal.tool_call is not None and proposal.tool_call.name == "mark_dnc"
-        )
+        )):
+            return False
+        return self._dnc_needs_more_than_a_guess()
+
+    def _dnc_needs_more_than_a_guess(self) -> bool:
+        if getattr(self._llm, "backend", "openai") == "local":
+            return True
+        min_words = self._state_machine.script.dnc_min_words
+        if not min_words:
+            return False
+        last = next((t.text for t in reversed(self._context.history) if t.speaker == "customer"), "")
+        return len(last.split()) < min_words
 
     def _may_speak_early(self, state: str) -> bool:
         """Whether a reply heading to `state` may start speaking before the whole
-        reply is validated. Not for a local model's DO_NOT_CALL: that proposal will be
-        refused, and its speech ("I'll add your number to our do-not-call list") was
-        heard by a customer who had asked for a sales call."""
-        return not (state == "DO_NOT_CALL" and getattr(self._llm, "backend", "openai") == "local")
+        reply is validated. Not for a DO_NOT_CALL that will be refused
+        (`_is_local_dnc_guess`): its speech ("I'll add your number to our do-not-call
+        list") was heard by a customer who had asked for a sales call."""
+        return not (state == "DO_NOT_CALL" and self._dnc_needs_more_than_a_guess())
 
     def _refuse_local_dnc_guess(self, outcome: ValidationOutcome) -> ValidationOutcome:
         """Rule 2: a refused proposal falls back to the current state and its
@@ -377,7 +390,7 @@ class ConversationEngine:
             return outcome
         logger.warning("dnc_from_local_model_refused", extra={"proposed_state": outcome.proposal.state})
         return build_fallback_outcome(
-            self._state_machine, "do-not-call guessed by the local model", self._context.lead_fields
+            self._state_machine, "do-not-call guessed (local model or too few words)", self._context.lead_fields
         )
 
     def _turn_schema(self, customer_spoke: bool = True) -> dict:

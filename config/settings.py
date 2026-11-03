@@ -89,6 +89,13 @@ class Settings(BaseSettings):
     # "" = standard processing; "priority" = OpenAI Fast mode (faster, ~1.75x token
     # price — gpt-4.1-mini $0.70/$2.80 per 1M; still < $0.02 per call).
     openai_llm_service_tier: str = ""
+    # A reply is one or two short sentences plus the JSON around them (~150 tokens in
+    # Hindi). The cap stops a runaway reply — a stream that hit the 8 s turn limit on a
+    # live call ended in the fallback line ("Sorry, is this Demo Business?") after the
+    # customer had already confirmed. Low temperature: a live reply once mixed in
+    # Chinese characters ("आप安心 रहिए").
+    openai_llm_max_tokens: int = 400
+    openai_llm_temperature: float = 0.3
     # When a call connects, send one 1-token request with the call's prompt so the
     # connection is open and OpenAI's prompt cache is filled while the greeting plays:
     # the first real reply took 3.3 s cold vs ~1 s warm. Costs ~4k input tokens
@@ -112,6 +119,30 @@ class Settings(BaseSettings):
     # (minimal|low|medium|high|xhigh — OpenAI realtime-transcription guide).
     openai_realtime_stt_model: str = "gpt-live-transcribe"
     stt_realtime_delay: str = "low"
+
+    # --- Sarvam AI: Indian-language speech (speech/stt/sarvam.py, speech/tts/sarvam.py) ---
+    # Live Vobiz calls in Hindi (2026-10-28/31) with OpenAI speech: the transcriber
+    # misheard short Hindi replies ("मत" for a greeting, "नाइन" for "नमन"), took 2-12 s
+    # (once 38 s) to finalize a turn, and the voice's Hindi sounded foreign to the
+    # owner. Sarvam's models are trained on Indian phone speech. With a key set, speech
+    # goes through Sarvam and falls back to OpenAI by itself if Sarvam fails. Prices
+    # (sarvam.ai/api-pricing, 2026-11): STT ₹0.49/min, Bulbul v4 Flash TTS ₹2 per 1,000
+    # characters — about ₹2-3 for a 2-minute call.
+    sarvam_api_key: str = ""
+    sarvam_api_base_url: str = "https://api.sarvam.ai"
+    # saaras:v4 is the docs' current default. "codemix" writes Hindi words in Devanagari
+    # and English words in English letters — what the LLM and the voice handle best.
+    sarvam_stt_model: str = "saaras:v4"
+    sarvam_stt_mode: str = "codemix"
+    sarvam_stt_language: str = "hi-IN"  # "unknown" = auto-detect
+    # Female Hindi voice the Bulbul v4 Flash guide ranks first for sales/customer care.
+    # The English persona of the same speaker reads replies with no Hindi in them.
+    sarvam_tts_model: str = "bulbul:v4-flash"
+    sarvam_tts_speaker: str = "aparna_hi_customer"
+    sarvam_tts_speaker_en: str = "aparna_en_edtech"
+    sarvam_tts_pace: float = 1.05
+    sarvam_tts_temperature: float = 0.5
+    sarvam_http_timeout_seconds: float = 8.0
 
     # --- AI backend: OpenAI, or local models on this machine ---
     # "auto": OpenAI when its key works; each component (STT/LLM/TTS) falls back to
@@ -319,6 +350,11 @@ class Settings(BaseSettings):
     # voices and sentences missing their middle. Shorter sounds while the agent talks
     # are treated as backchannel and ignored (no reply to them either).
     barge_in_min_speech_ms: int = Field(default=600, ge=100, le=2000)
+    # Let the greeting finish even if the customer talks over it. People answer with
+    # "hello? hello?" — on a live Vobiz call (2026-10-28) that cut the greeting off,
+    # the customer heard nothing and asked why there was no voice. What they said is
+    # still transcribed and answered once the greeting ends.
+    barge_in_during_opening: bool = False
 
     # --- Realtime latency / resilience tuning ---
     # Hard deadlines so one slow provider call can't hang a live phone call

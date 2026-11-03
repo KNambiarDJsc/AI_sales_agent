@@ -101,6 +101,7 @@ class VoiceSession:
         self._resample_stt = ResampleState()
 
         self._speaking_task: asyncio.Task | None = None
+        self._opening_task: asyncio.Task | None = None  # the scripted greeting; see settings.barge_in_during_opening
         self._background: set[asyncio.Task] = set()
         # Speech heard while the agent talks (see _process_vad_frame): how much, and
         # whether it has already interrupted the agent this utterance.
@@ -161,6 +162,7 @@ class VoiceSession:
         scripted = self._engine.scripted_opening()
         if scripted is not None:
             self._start_speaking(scripted)
+            self._opening_task = self._speaking_task
             return
         await self._run_agent_turn("")
 
@@ -267,7 +269,14 @@ class VoiceSession:
         # settings.barge_in_min_speech_ms — not a "haan", a cough or line echo, which
         # each used to cut the agent off mid-sentence. Still never inside the grace
         # window right after our own audio starts (echo of it).
-        if self._turn_taker.speech_in_progress and self._agent_speaking() and not self._barged_in_this_utterance:
+        greeting = self._opening_task is not None and self._speaking_task is self._opening_task
+        may_interrupt = self._settings.barge_in_during_opening or not greeting
+        if (
+            may_interrupt
+            and self._turn_taker.speech_in_progress
+            and self._agent_speaking()
+            and not self._barged_in_this_utterance
+        ):
             if is_speech:
                 self._overlap_speech_ms += VAD_FRAME_MS
             if self._overlap_speech_ms >= self._settings.barge_in_min_speech_ms:

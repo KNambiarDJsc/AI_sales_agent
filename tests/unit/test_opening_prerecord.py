@@ -35,8 +35,14 @@ async def test_opening_is_recorded_during_ringing_and_played_without_synthesis(m
     assert tel.sent_frames and synthesized == []
 
 
-async def test_missing_lead_fields_record_nothing(monkeypatch):
+async def test_missing_lead_fields_use_the_next_opening_line(monkeypatch):
+    # No contact name: the line without the name, never "{contact_name}" or "None".
     calls = []
     monkeypatch.setattr(opening.acknowledgments, "prerecord_one_off", lambda *a: calls.append(a) or asyncio.sleep(0))
     opening.prerecord_opening("seller-flow", opening.lead_fields("", "Demo Business", {}))
-    assert calls == []
+    opening.prerecord_opening("seller-flow", opening.lead_fields("", "", {}))
+    await asyncio.sleep(0)
+    texts = [text for _, text in calls]
+    assert texts == ["नमस्ते, क्या मेरी बात Demo Business से हो रही है?",
+                     "नमस्ते, क्या आप अपने business के owner बोल रहे हैं?"]
+    assert all("{" not in t and "None" not in t for t in texts)

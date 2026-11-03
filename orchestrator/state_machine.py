@@ -55,7 +55,7 @@ class StateConfig(BaseModel):
     # Scripted line spoken without an LLM round trip (used for the call's first words,
     # where a model call only adds 1-2s of dead air before the greeting plays). See
     # ScriptConfig.opening_line_for. Only meaningful on the script's starting state.
-    opening_line: str = ""
+    opening_line: str | list[str] = ""
     transitions_on: dict[str, str] = Field(default_factory=dict)
 
 
@@ -70,6 +70,10 @@ class ScriptConfig(BaseModel):
     retry_limits: dict[str, int] = Field(default_factory=lambda: {"per_question": 2, "per_state": 3})
     qualification_ref: str | None = None
     dnc_phrases: list[str] = Field(default_factory=list)
+    # The LLM may only put a lead on do-not-call from a customer message of at least
+    # this many words (0 = no minimum); see ConversationEngine._is_local_dnc_guess.
+    # The configured dnc_phrases always count, however short.
+    dnc_min_words: int = 0
     sales_followup_states: list[str] = Field(default_factory=list)
     not_interested_states: list[str] = Field(default_factory=list)
     acknowledgments: dict[str, list[str]] = Field(default_factory=dict)
@@ -106,18 +110,23 @@ class ScriptConfig(BaseModel):
 
     def opening_line_for(self, state_name: str, fields: dict | None = None) -> str:
         """The configured first line of the call with lead fields filled in, or "" if
-        none is configured or any `{field}` it uses is missing/empty for this lead —
-        then the LLM writes the opening as before, rather than the customer hearing
-        "{contact_name}" or "None"."""
+        none is configured or every configured line uses a `{field}` that is
+        missing/empty for this lead — then the LLM writes the opening as before,
+        rather than the customer hearing "{contact_name}" or "None". `opening_line`
+        may be a list: the first line whose fields this lead has is used (e.g. one
+        with the contact's name, then one with only the business name)."""
         state = self.states.get(state_name)
-        text = state.opening_line.strip() if state else ""
-        if not text:
+        if state is None:
             return ""
         fields = fields or {}
-        needed = {name for _, name, _, _ in string.Formatter().parse(text) if name}
-        if any(not str(fields.get(name) or "").strip() for name in needed):
-            return ""
-        return substitute_placeholders(text, fields)
+        lines = [state.opening_line] if isinstance(state.opening_line, str) else state.opening_line
+        for text in (line.strip() for line in lines):
+            if not text:
+                continue
+            needed = {name for _, name, _, _ in string.Formatter().parse(text) if name}
+            if all(str(fields.get(name) or "").strip() for name in needed):
+                return substitute_placeholders(text, fields)
+        return ""
 
     def _in_language(self, text: str | dict[str, str], language: str | None) -> str:
         if isinstance(text, dict):
@@ -152,6 +161,7 @@ def load_script(path: str | Path) -> ScriptConfig:
         retry_limits=raw.get("retry_limits", {"per_question": 2, "per_state": 3}),
         qualification_ref=raw.get("qualification_ref"),
         dnc_phrases=raw.get("dnc_phrases") or [],
+        dnc_min_words=raw.get("dnc_min_words", 0),
         sales_followup_states=raw.get("sales_followup_states") or [],
         not_interested_states=raw.get("not_interested_states") or [],
         acknowledgments=raw.get("acknowledgments") or {},

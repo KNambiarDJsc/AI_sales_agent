@@ -13,11 +13,21 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import re
 from collections.abc import AsyncIterator, Iterable
 
 from speech.tts.base import TTSProvider
 
 _DONE = object()
+
+# Characters a reply may be spoken with: Latin, Devanagari, digits, punctuation and
+# common symbols. gpt-4.1-mini once wrote Chinese mid-sentence on a live Hindi call
+# ("आप安心 रहिए"); the voice would read it out in another language.
+_UNSPEAKABLE = re.compile(r"[^\u0000-\u024F\u0900-\u097F\u2000-\u206F\u20B9]+")
+
+
+def speakable(text: str) -> str:
+    return " ".join(_UNSPEAKABLE.sub(" ", text).split())
 
 
 async def phrases_from(texts: Iterable[str]) -> AsyncIterator[str]:
@@ -33,7 +43,8 @@ async def synthesize_phrases(tts: TTSProvider, phrases: AsyncIterator[str]) -> A
 
     async def produce(text: str, out: asyncio.Queue) -> None:
         try:
-            async for chunk in tts.synthesize_stream(text):
+            text = speakable(text)
+            async for chunk in (tts.synthesize_stream(text) if text else _nothing()):
                 await out.put(chunk)
             await out.put(_DONE)
         except asyncio.CancelledError:
@@ -70,3 +81,8 @@ async def synthesize_phrases(tts: TTSProvider, phrases: AsyncIterator[str]) -> A
         for task in (feeder, *producers):
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
+
+
+async def _nothing() -> AsyncIterator[bytes]:
+    return
+    yield

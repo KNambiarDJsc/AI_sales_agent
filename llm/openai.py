@@ -19,6 +19,8 @@ class OpenAILLMProvider(LLMProvider):
         self._model = settings.openai_llm_model
         self._reasoning_effort = settings.openai_llm_reasoning_effort
         self._service_tier = settings.openai_llm_service_tier
+        self._max_tokens = settings.openai_llm_max_tokens
+        self._temperature = settings.openai_llm_temperature
 
     def _request_kwargs(self, messages: list[LLMMessage], schema_name: str, json_schema: dict) -> dict:
         kwargs = {
@@ -29,8 +31,12 @@ class OpenAILLMProvider(LLMProvider):
                 "json_schema": {"name": schema_name, "schema": json_schema, "strict": True},
             },
         }
+        if self._max_tokens:
+            kwargs["max_completion_tokens"] = self._max_tokens
         if self._reasoning_effort:
-            kwargs["reasoning_effort"] = self._reasoning_effort
+            kwargs["reasoning_effort"] = self._reasoning_effort  # reasoning models take no temperature
+        else:
+            kwargs["temperature"] = self._temperature
         if self._service_tier:
             # OpenAI "Fast mode" (service_tier priority/fast). Via extra_body: the pinned
             # SDK (openai==1.58.1) only knows the older tier values.
@@ -63,7 +69,7 @@ class OpenAILLMProvider(LLMProvider):
         # Same model/prompt/schema as a real turn, so the prompt-cache prefix matches; one
         # output token keeps the cost to the (cached-rate) input.
         await get_openai_client().chat.completions.create(
-            **self._request_kwargs(messages, schema_name, json_schema), max_completion_tokens=1
+            **{**self._request_kwargs(messages, schema_name, json_schema), "max_completion_tokens": 1}
         )
 
     async def propose_stream(

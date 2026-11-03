@@ -38,8 +38,13 @@ states:
       like theirs sell on Amazon and online (mention their product category if the lead info has
       one), then ask if they would be interested. If it's the wrong person or business, apologize
       and close. If they are busy right now, ask when to call back.
-    # Hindi first (client, 2026-10-23). PLACEHOLDER wording.
-    opening_line: "नमस्ते, क्या मेरी बात {contact_name} जी से हो रही है, {business_name} से?"
+    # Hindi first (client, 2026-10-23). PLACEHOLDER wording. The first line whose fields
+    # the lead has is used: test calls without a name got an LLM-written opening that
+    # skipped the greeting and went straight into a long pitch (2026-10-31).
+    opening_line:
+      - "नमस्ते, क्या मेरी बात {contact_name} जी से हो रही है, {business_name} से?"
+      - "नमस्ते, क्या मेरी बात {business_name} से हो रही है?"
+      - "नमस्ते, क्या आप अपने business के owner बोल रहे हैं?"
     mandatory_questions:
       - "Confirm you're speaking with {contact_name} from {business_name}."
     allowed_tools: [update_lead, end_call]
@@ -208,6 +213,11 @@ dnc_phrases:
   - '(दोबारा|दुबारा|फिर से|कभी भी|कभी)\s*(कॉल|काल|फोन|फ़ोन)\s*(मत|ना|नहीं)'
   - '(मेरा|हमारा)\s*(नंबर|नम्बर)\s*(हटा|हटाओ|डिलीट)'
   - '(लिस्ट|सूची)\s*से\s*(हटा|हटाओ|निकाल)'
+
+# The LLM may only put a lead on do-not-call from a message of at least 3 words; the
+# phrases above always count. A greeting misheard as "मत" ("don't") ended a live call
+# on do-not-call (2026-10-31).
+dnc_min_words: 3
 
 # Pre-recorded fillers played the moment the customer's words are recognized, while the
 # reply is prepared. PLACEHOLDER wording.

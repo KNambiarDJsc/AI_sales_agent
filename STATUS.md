@@ -1,8 +1,32 @@
 # Status
 
-Last updated: 2026-10-23 (client feedback: female Indian voice, Hindi first, call transcripts). Read
+Last updated: 2026-11-03 (Hindi calls: Sarvam speech, do-not-call guard, greeting fixes). Read
 this before adding anything — it tracks what's real vs. placeholder, and what happens when client
 materials (code, prompts, scripts, credentials, models) arrive.
+
+## Hindi calls not working (owner, 2026-11-03)
+
+The owner called the Hindi calls "useless": the voice didn't speak Hindi properly and replies were
+slow. What the last live Vobiz calls (2026-10-28 and 2026-10-31) showed, and what was done:
+
+| Seen on the call | Cause | Fix |
+|---|---|---|
+| Customer's "हाँ मैं नमन बोल रहा हूँ" heard as "नाइन", a greeting heard as "मत" | OpenAI transcriber on 8 kHz Hindi phone audio | Sarvam `saaras:v4` (Indian speech, `codemix`) when `SARVAM_API_KEY` is set; OpenAI as backup |
+| Turn finalization 2–12 s (once 38 s) on `gpt-live-transcribe` | same | same (Sarvam finalizes on our flush) |
+| Hindi voice sounded foreign | OpenAI TTS | Sarvam `bulbul:v4-flash`, `aparna_hi_customer` (female, ranked first for Hindi sales in Sarvam's guide) |
+| Lead put on do-not-call after the single (misheard) word "मत" | LLM judged DNC from one word | script `dnc_min_words: 3` — shorter messages can't trigger the LLM's DNC; configured phrases still always win (rule 3) |
+| Chinese characters in a Hindi reply ("आप安心 रहिए") | gpt-4.1-mini at default temperature | temperature 0.3; anything outside Latin/Devanagari is never sent to the voice (`speech_pipeline.speakable`) |
+| "Why is there no voice?" after "hello?" on pickup | barge-in cut the greeting off | the greeting can't be interrupted (`barge_in_during_opening: false`) |
+| A reply waited the full 8 s and the fallback "Sorry, is this Demo Business?" was said after the customer had confirmed | LLM stream never finished in time | `max_completion_tokens` 400 caps a runaway reply |
+| Test calls without a name had no greeting (LLM-written pitch instead) | the one opening line needed `{contact_name}` | `opening_line` is a list: with name / business only / neither |
+| A Vobiz hang-up webhook hit a Postgres deadlock (500) | finalize from the webhook and the media socket at once | `finalize_call` locks the call_attempt row first, so the second waits for the first |
+
+**Sarvam is not live until a key is in `.env`** (`SARVAM_API_KEY`). The adapters follow Sarvam's
+docs and official SDK (sarvamai 0.1.42) and pass tests against local fakes of that protocol, but have
+not been run against the real service yet. Unverified points, in order of risk: whether `linear16`
+TTS output has a WAV header (handled either way), and whether a flush returns a segment when
+Sarvam's own VAD already sent it (handled: we wait 0.7 s for more, then use what arrived).
+Prices (sarvam.ai/api-pricing, 2026-11): STT ₹0.49/min, Bulbul v4 Flash ₹2 per 1,000 characters.
 
 ## Client feedback after the demo (2026-10-23)
 

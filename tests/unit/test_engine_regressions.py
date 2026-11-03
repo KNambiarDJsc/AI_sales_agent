@@ -404,3 +404,77 @@ async def test_reaching_end_without_a_question_hangs_up(monkeypatch):
                                 tool_registry=ToolRegistry())
     result, _ = await _run(engine, "Thanks, bye.")
     assert result.new_state == "END" and result.end_call is True
+
+
+class _RecordingRegistry(ToolRegistry):
+    def __init__(self):
+        super().__init__()
+        self.invoked = []
+
+    async def invoke(self, ctx, name, arguments):
+        self.invoked.append(name)
+        return ToolResult(success=True)
+
+
+async def test_one_misheard_word_never_puts_a_lead_on_do_not_call(monkeypatch):
+    # Live Vobiz call, 2026-10-31: the customer's greeting was transcribed as "मत"
+    # ("don't"), gpt-4.1-mini proposed DO_NOT_CALL and the lead was suppressed.
+    from orchestrator.state_machine import load_script_by_id
+
+    _patch_session_scope(monkeypatch, [])
+    registry = _RecordingRegistry()
+    engine = ConversationEngine(FakeNonStreamingLLM(_dnc_guess_payload()),
+                                StateMachine(load_script_by_id("seller-flow"), "INTRO"), _context(),
+                                tool_registry=registry)
+    result, spoken = await _run(engine, "मत")
+    await asyncio.sleep(0.05)
+    assert registry.invoked == []
+    assert result.new_state == "INTRO" and result.end_call is False
+    # The state's own fallback line, never the refused reply's words.
+    assert len(spoken) == 1 and spoken[0].startswith("माफ़ कीजिए") and "team will call" not in spoken[0]
+
+
+async def test_a_real_do_not_call_sentence_is_still_honoured(monkeypatch):
+    from orchestrator.state_machine import load_script_by_id
+
+    _patch_session_scope(monkeypatch, [])
+    registry = _RecordingRegistry()
+    engine = ConversationEngine(FakeNonStreamingLLM(_dnc_guess_payload()),
+                                StateMachine(load_script_by_id("seller-flow"), "INTRO"), _context(),
+                                tool_registry=registry)
+    result, _ = await _run(engine, "मुझे ये कॉल्स बिल्कुल नहीं चाहिए")
+    await asyncio.sleep(0.05)
+    assert registry.invoked == ["mark_dnc"]
+    assert result.new_state == "DO_NOT_CALL"
+
+
+async def test_a_short_configured_dnc_phrase_still_wins(monkeypatch):
+    # DNC always wins (rule 3): the configured phrases count however short they are.
+    from orchestrator.state_machine import load_script_by_id
+
+    _patch_session_scope(monkeypatch, [])
+    registry = _RecordingRegistry()
+    engine = ConversationEngine(_NoLLM(""), StateMachine(load_script_by_id("seller-flow"), "INTRO"), _context(),
+                                tool_registry=registry)
+    result, _ = await _run(engine, "dobara call mat karna")
+    await asyncio.sleep(0.05)
+    assert registry.invoked == ["mark_dnc"] and result.new_state == "DO_NOT_CALL"
+
+
+@pytest.mark.parametrize("fields, expected", [
+    ({"contact_name": "Naman", "business_name": "Demo Business"}, "नमस्ते, क्या मेरी बात Naman जी से हो रही है, Demo Business से?"),
+    ({"contact_name": "", "business_name": "Demo Business"}, "नमस्ते, क्या मेरी बात Demo Business से हो रही है?"),
+    ({}, "नमस्ते, क्या आप अपने business के owner बोल रहे हैं?"),
+])
+async def test_seller_flow_always_opens_with_a_scripted_greeting(monkeypatch, fields, expected):
+    # 2026-10-31: test calls without a name got an LLM-written opening with no greeting.
+    from orchestrator.state_machine import load_script_by_id
+
+    _patch_session_scope(monkeypatch, [])
+    context = _context()
+    context.lead_fields = fields
+    engine = ConversationEngine(_NoLLM(""), StateMachine(load_script_by_id("seller-flow"), "INTRO"), context,
+                                tool_registry=ToolRegistry())
+    _, spoken = await _run(engine, "")
+    await asyncio.sleep(0.05)
+    assert spoken == [expected]

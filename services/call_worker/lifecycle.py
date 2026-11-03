@@ -39,7 +39,11 @@ async def finalize_call(
     final_state: str | None = None,
 ) -> str | None:
     """Returns the attempt's outcome (or None if the attempt doesn't exist)."""
-    attempt = await session.get(CallAttempt, call_attempt_id)
+    # Row lock first: the hang-up webhook and the media socket's teardown finalize the
+    # same call at the same moment, and updating its conversation/lead rows in
+    # different orders deadlocked (live Vobiz call, 2026-10-28: webhook 500). Now the
+    # second waits for the first and then finds everything already done.
+    attempt = await session.get(CallAttempt, call_attempt_id, with_for_update=True)
     if attempt is None:
         return None
     lead = await session.get(Lead, attempt.lead_id)

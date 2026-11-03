@@ -21,7 +21,8 @@ flowchart LR
     API -->|"place call"| VZ["Vobiz<br/>(phone network)"]
     VZ <-->|"live call audio<br/>(WebSocket)"| API
     VZ -->|"rings"| P(("Lead's phone"))
-    API <-->|"speech-to-text, reply,<br/>text-to-speech"| OAI["OpenAI<br/>(cheap models)"]
+    API <-->|"Hindi speech-to-text,<br/>Hindi voice"| SV["Sarvam AI<br/>(Indian speech models)"]
+    API <-->|"reply (gpt-4.1-mini);<br/>speech backup"| OAI["OpenAI<br/>(cheap models)"]
     API -->|"results"| XL["Excel export<br/>exports/call_log.xlsx"]
 ```
 
@@ -32,7 +33,7 @@ flowchart LR
 | Telephony | Places the call and streams audio (Vobiz today; FreJun/Exotel/Twilio adapters exist) | `telephony/` |
 | Voice session | The live call: hears the customer, detects when they stop talking, plays the agent's voice | `voice/session/session.py` |
 | Brain | Decides what to say next, within the script's rules | `orchestrator/` |
-| Speech | Speech-to-text and text-to-speech (OpenAI; local backup models too) | `speech/` |
+| Speech | Speech-to-text and text-to-speech: Sarvam (Hindi/Hinglish) when its key is set, else OpenAI; OpenAI is also Sarvam's automatic backup | `speech/` |
 | LLM | Writes the agent's reply (gpt-4.1-mini) | `llm/` |
 | Tools | The only actions the agent can take: book a callback, mark do-not-call, save qualification… | `tools/` |
 | Business config | The script, the wording, the facts it may say, the qualification bar | `config/` |
@@ -182,9 +183,27 @@ hard to follow.
   speakers say those too (`orchestrator/language.py`).
 - Hindi is always written in Devanagari for the voice; the transcriber is told to do the
   same, which also made it hear Hinglish more accurately.
-- The voice is OpenAI's `coral`, a woman's voice told to speak with an Indian accent
-  (`OPENAI_TTS_VOICE`, `OPENAI_TTS_INSTRUCTIONS`). The prompt tells the agent she is a
-  woman, so her Hindi uses feminine forms ("मैं समझ गई", "बता सकती हूँ").
+- **Sarvam AI** handles the speech when `SARVAM_API_KEY` is set (2026-11-03, after the
+  owner found the OpenAI voice's Hindi unusable and the OpenAI transcriber mishearing
+  short Hindi replies):
+  - hearing: `saaras:v4` in `codemix` mode — Hindi words in Devanagari, English words
+    in English letters (`speech/stt/sarvam.py`);
+  - voice: `bulbul:v4-flash`, speaker `aparna_hi_customer`, a woman's Hindi voice made for
+    sales calls; replies with no Hindi in them use the same speaker's English persona
+    (`speech/tts/sarvam.py`, `SARVAM_TTS_SPEAKER`, `SARVAM_TTS_SPEAKER_EN`).
+  - If Sarvam fails (can't connect, out of credits), OpenAI takes over by itself
+    mid-call (`speech/tts/sarvam_fallback.py`, `SarvamWithFallbackSTTProvider`).
+- Without a Sarvam key the voice is OpenAI's `coral`, told to speak with an Indian
+  accent (`OPENAI_TTS_VOICE`, `OPENAI_TTS_INSTRUCTIONS`).
+- Either way the prompt tells the agent she is a woman, so her Hindi uses feminine forms
+  ("मैं समझ गई", "बता सकती हूँ").
+- The greeting can't be talked over: people answer with "hello? hello?", which used to
+  cut it off (`BARGE_IN_DURING_OPENING`). What they said is still answered after it.
+- A lead with no name still gets a scripted greeting (the script's `opening_line` is a
+  list: with name, with business only, neither).
+- Do-not-call from the AI's judgement needs a real sentence (script `dnc_min_words: 3`);
+  one misheard word ("मत") once suppressed a lead. The configured DNC phrases still win
+  however short.
 
 Rule of the house: **the AI proposes, the app decides.** The model never directly
 changes a lead's result, never skips the script, never runs a tool that state doesn't
@@ -262,7 +281,7 @@ through your browser microphone — no phone call, no telephony cost.
 | Change general behavior (tone, name usage, language) | `config/prompts/system_prompt.yaml` |
 | Change what counts as "qualified" | `config/qualification/seller-flow.yaml` |
 | Change call length, silence timeout, models, login | `.env` (see `.env.example` for every option) |
-| Change the voice | `.env` → `OPENAI_TTS_VOICE` (a male voice also needs the "You are a woman" rule changed in `config/prompts/system_prompt.yaml`) |
+| Change the voice | `.env` → `SARVAM_TTS_SPEAKER` (with Sarvam) or `OPENAI_TTS_VOICE` (without). A male voice also needs the "You are a woman" rule changed in `config/prompts/system_prompt.yaml` |
 | Change which language calls start in | `config/scripts/seller-flow.yaml` → `language` and the INTRO `opening_line` |
 | Calling hours | Console → Settings |
 
@@ -275,8 +294,10 @@ If a business change needs a `.py` edit, that's a bug — business logic lives i
 | Part | ~Cost for a 2-minute call |
 |---|---|
 | Vobiz phone minutes | under ₹1 |
-| OpenAI speech-to-text (streaming) | ~$0.03 |
-| OpenAI reply model (gpt-4.1-mini) + voice | ~$0.02 |
+| Sarvam speech-to-text (₹0.49/min) | ~₹1 |
+| Sarvam voice (₹2 per 1,000 characters) | ~₹1–2 |
+| OpenAI reply model (gpt-4.1-mini) | ~$0.01 |
+| Without Sarvam: OpenAI speech-to-text + voice | ~$0.04 |
 
 Expensive OpenAI models are blocked in code (`config/settings.py`) unless explicitly
 allowed, so a typo can't burn the budget.

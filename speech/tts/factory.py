@@ -8,7 +8,13 @@ from speech.tts.base import TTSProvider
 
 
 def get_tts_provider() -> TTSProvider:
-    mode = get_settings().ai_backend
+    settings = get_settings()
+    mode = settings.ai_backend
+    if settings.sarvam_api_key and mode != "local":
+        # Hindi-native voice; OpenAI takes over by itself if Sarvam fails.
+        from speech.tts.sarvam_fallback import SarvamFallbackTTSProvider
+
+        return SarvamFallbackTTSProvider()
     if mode == "openai":
         from speech.tts.openai import OpenAITTSProvider
 
