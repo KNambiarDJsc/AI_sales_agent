@@ -37,10 +37,13 @@ from speech.stt.base import STTProvider, STTStream, TranscriptResult
 logger = logging.getLogger(__name__)
 
 SARVAM_STT_SAMPLE_RATE_HZ = 16000
-FINAL_TRANSCRIPT_TIMEOUT_SECONDS = 6.0
-# Sarvam's own VAD may already have sent this turn's transcript before our flush; if
-# so, the flush may bring nothing more, and this is how long we wait for more text.
-_LATE_SEGMENT_SECONDS = 0.7
+# Measured against the live service (2026-11-03): with speech still pending, the flush's
+# transcript arrived ~0.15 s after the flush. With nothing pending — Sarvam's own VAD
+# already sent the segment, or the "turn" was only noise — the flush gets no reply at
+# all, so these waits are kept short: every second here is dead air on the call, and
+# a noise turn would hold up the next real one.
+FINAL_TRANSCRIPT_TIMEOUT_SECONDS = 1.5
+_LATE_SEGMENT_SECONDS = 0.3
 
 
 def stt_url(base_url: str, model: str, mode: str, language: str) -> str:
