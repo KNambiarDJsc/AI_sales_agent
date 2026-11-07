@@ -84,6 +84,9 @@ async def telephony_status_callback(provider_name: str, request: Request) -> dic
 
     logger.info(
         "webhook_call_status",
-        extra={"provider": provider_name, "event_type": event.event_type, "status": event.status.value},
+        extra={"provider": provider_name, "event_type": event.event_type, "status": event.status.value,
+               # The provider's own reason (e.g. Vobiz HangupCause/HangupCauseCode): "busy"
+               # alone can't tell a rejected call from a network refusal.
+               "cause": event.raw.get("HangupCause"), "cause_code": event.raw.get("HangupCauseCode")},
     )
     return {"status": "ok"}
