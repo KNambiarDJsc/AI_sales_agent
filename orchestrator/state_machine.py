@@ -79,6 +79,17 @@ class ScriptConfig(BaseModel):
     acknowledgments: dict[str, list[str]] = Field(default_factory=dict)
     # Said when the call reaches its time limit (one line, or one per language).
     time_up_line: str | dict[str, str] = ""
+    # States that hand the lead to a person. If the call reached one and ends without
+    # a recorded follow-up, the application records one itself, with the customer's
+    # own last words as the note (ConversationEngine.save_pending_followup).
+    followup_backstop_states: list[str] = Field(default_factory=list)
+    # True: what is said on the call (first line, pitch, facts) comes from a call
+    # script — a built-in one or the client's upload (orchestrator/call_script.py).
+    uses_call_script: bool = False
+    # How the agent talks in Hindi: "hinglish" (everyday Hindi with the English words
+    # people really use on business calls), "hindi" or "english". "" = the older
+    # behaviour (plain everyday Hindi). Set from the call script.
+    speech_style: str = ""
 
     def is_dnc_request(self, customer_text: str) -> bool:
         """Deterministic DNC detection from the script's configured phrases — see
@@ -166,6 +177,9 @@ def load_script(path: str | Path) -> ScriptConfig:
         not_interested_states=raw.get("not_interested_states") or [],
         acknowledgments=raw.get("acknowledgments") or {},
         time_up_line=raw.get("time_up_line") or "",
+        uses_call_script=bool(raw.get("uses_call_script", False)),
+        followup_backstop_states=raw.get("followup_backstop_states") or [],
+        speech_style=raw.get("speech_style") or "",
     )
 
 

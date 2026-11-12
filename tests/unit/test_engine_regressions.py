@@ -431,7 +431,7 @@ async def test_one_misheard_word_never_puts_a_lead_on_do_not_call(monkeypatch):
     assert registry.invoked == []
     assert result.new_state == "INTRO" and result.end_call is False
     # The state's own fallback line, never the refused reply's words.
-    assert len(spoken) == 1 and spoken[0].startswith("माफ़ कीजिए") and "team will call" not in spoken[0]
+    assert len(spoken) == 1 and spoken[0].startswith("Sorry") and "team will call" not in spoken[0]
 
 
 async def test_a_real_do_not_call_sentence_is_still_honoured(monkeypatch):
@@ -464,7 +464,7 @@ async def test_a_short_configured_dnc_phrase_still_wins(monkeypatch):
 @pytest.mark.parametrize("fields, expected", [
     ({"contact_name": "Naman", "business_name": "Demo Business"}, "नमस्ते, क्या मेरी बात Naman जी से हो रही है, Demo Business से?"),
     ({"contact_name": "", "business_name": "Demo Business"}, "नमस्ते, क्या मेरी बात Demo Business से हो रही है?"),
-    ({}, "नमस्ते, क्या आप अपने business के owner बोल रहे हैं?"),
+    ({}, "नमस्ते, क्या मेरी बात shop के owner से हो रही है?"),
 ])
 async def test_seller_flow_always_opens_with_a_scripted_greeting(monkeypatch, fields, expected):
     # 2026-10-31: test calls without a name got an LLM-written opening with no greeting.

@@ -17,7 +17,7 @@ def _script():
 
 def test_flow_branches_match_the_client_brief():
     s = _script()
-    assert s.states["INTRO"].transitions_on["confirmed_business"] == "PITCH"
+    assert s.states["INTRO"].transitions_on["confirmed_or_listening"] == "PITCH"
     pitch = set(s.states["PITCH"].transitions_on.values())
     assert pitch == {"INTERESTED", "OBJECTION_HANDLING", "CALLBACK", "CLARIFY"}
     # not interested → objection handling → reassess (can still become interested)
@@ -107,15 +107,15 @@ def test_a_short_yes_keeps_the_language_hindi_first():
 
 def test_fallback_lines_start_in_hindi_and_follow_a_clear_switch():
     sm = StateMachine(_script(), "CALLBACK")
-    assert sm.fallback_response() == "ज़रूर। आपसे बात करने का सही समय कब रहेगा?"
+    assert sm.fallback_response() == "ज़रूर। आपसे बात करने का सही time कब रहेगा?"
     sm.note_customer_text("Yes")
-    assert sm.fallback_response() == "ज़रूर। आपसे बात करने का सही समय कब रहेगा?"
+    assert sm.fallback_response() == "ज़रूर। आपसे बात करने का सही time कब रहेगा?"
     sm.note_customer_text("Please call me tomorrow evening.")
     assert sm.fallback_response() == "Sure. When would be a better time to reach you?"
     sm.note_customer_text("ok")
     assert sm.fallback_response() == "Sure. When would be a better time to reach you?"
     sm.note_customer_text("Haan kal shaam ko karna")
-    assert sm.fallback_response() == "ज़रूर। आपसे बात करने का सही समय कब रहेगा?"
+    assert sm.fallback_response() == "ज़रूर। आपसे बात करने का सही time कब रहेगा?"
 
 
 def test_hindi_lines_speak_as_a_woman():

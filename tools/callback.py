@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import select
 
 from database.models import Callback
@@ -28,6 +28,27 @@ class ScheduleCallbackInput(BaseModel):
     )
     timezone: str = Field(default="Asia/Kolkata", description="IANA timezone the customer gave the time in.")
     notes: str | None = Field(default=None, description="Anything the sales team should know for the callback.")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _keep_unparseable_time_as_a_note(cls, data):
+        """"anytime" / "kal shaam" in requested_time used to fail the whole tool call —
+        and the agent had already told the customer the team would call (simulated
+        call, 2026-11-12). The follow-up is what matters: record it without a time and
+        keep what the model wrote in the notes for the person who calls back."""
+        if not isinstance(data, dict):
+            return data
+        raw = data.get("requested_time")
+        if isinstance(raw, str) and raw.strip():
+            try:
+                datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
+            except ValueError:
+                note = f"Time as said: {raw.strip()}"
+                existing = str(data.get("notes") or "").strip()
+                data = {**data, "requested_time": None, "notes": f"{existing} ({note})" if existing else note}
+        elif isinstance(raw, str):
+            data = {**data, "requested_time": None}
+        return data
 
 
 async def _handle(ctx: ToolContext, args: ScheduleCallbackInput) -> ToolResult:

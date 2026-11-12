@@ -208,6 +208,14 @@ class VobizProvider(TelephonyProvider):
         self._streams: dict[str, _Stream] = {}
         self.outbound_sample_rate_hz = settings.vobiz_outbound_sample_rate
 
+    @classmethod
+    def with_credentials(cls, auth_id: str, auth_token: str) -> "VobizProvider":
+        """A provider using these credentials instead of the configured ones — for
+        checking an account before it is linked (services/accounts/runtime.py)."""
+        provider = cls()
+        provider._auth_id, provider._auth_token = auth_id.strip(), auth_token.strip()
+        return provider
+
     # --- URLs we hand to Vobiz ---------------------------------------------------
 
     def token_for(self, call_attempt_id: str) -> str:
@@ -256,6 +264,19 @@ class VobizProvider(TelephonyProvider):
         cheap check that the credentials work. Used by the preflight script."""
         async with self._client() as client:
             resp = await client.get(f"/balance/{currency}")
+        self._raise_for_status(resp)
+        return resp.json()
+
+    async def list_cdrs(self, page: int = 1, per_page: int = 100) -> dict[str, Any]:
+        """`GET /Account/{auth_id}/cdr` (docs: cdr/list-cdrs) — one record per call
+        with what it was billed. Response shape confirmed against the live API
+        (2026-11-12): `{"data": [{"uuid": <call uuid>, "billsec", "duration", "cost",
+        "streaming_cost", "total_cost", "currency", "hangup_cause", ...}],
+        "pagination": {"page", "per_page", "total", "pages", "has_next"}}`. `uuid` is
+        the request_uuid the make-call API returned (our provider_call_id: all 34
+        records matched stored attempts); `page`/`per_page` are honoured."""
+        async with self._client() as client:
+            resp = await client.get("/cdr", params={"page": page, "per_page": per_page})
         self._raise_for_status(resp)
         return resp.json()
 

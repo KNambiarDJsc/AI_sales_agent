@@ -28,6 +28,7 @@ full rationale):
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -146,6 +147,8 @@ class ConversationEngine:
         self._tools = tool_registry or get_default_registry()
         self._settings = get_settings()
         self._ack_index = -1  # rotation for acknowledgment()
+        self._visited: set[str] = {state_machine.current_state}
+        self._followup_saved = False  # a schedule_callback succeeded on this call
         if context.call_started_at is None:
             context.call_started_at = time.monotonic()
 
@@ -240,6 +243,8 @@ class ConversationEngine:
             if proposal.tool_call.name in ("end_call", "mark_dnc") and result.success:
                 end_call = True
                 dnc_recorded = proposal.tool_call.name == "mark_dnc"
+            if proposal.tool_call.name == "schedule_callback" and result.success:
+                self._followup_saved = True
             if not result.success:
                 # Not "message": that key is reserved on LogRecord, and logging raises
                 # KeyError for it — which turned every failed tool call into a crashed turn.
@@ -268,6 +273,12 @@ class ConversationEngine:
 
         previous_state = self._state_machine.current_state
         self._state_machine.transition_to(proposal.state)
+        self._visited.add(self._state_machine.current_state)
+        if end_call:
+            await self.save_pending_followup(
+                session=session, tenant_id=tenant_id, campaign_id=campaign_id, lead_id=lead_id,
+                conversation_id=conversation_id,
+            )
         # The prompt is built from the context's state (orchestrator/prompts.py), so it
         # has to follow the state machine — otherwise every turn's prompt describes
         # INTRO's objective/questions/tools for the whole call.
@@ -348,6 +359,35 @@ class ConversationEngine:
             proposal=proposal,
         )
         return TurnResult(speech=speech, end_call=True, new_state="DO_NOT_CALL", tool_result_summary=result.message)
+
+    async def save_pending_followup(
+        self, *, session: AsyncSession, tenant_id: UUID, campaign_id: UUID, lead_id: UUID, conversation_id: UUID
+    ) -> bool:
+        """Follow-up backstop. The call reached a state that hands the lead to a person
+        (script config: `followup_backstop_states`) but no callback was recorded —
+        the model said "our team will call you at 2" without calling
+        schedule_callback (1 simulated call in 4, 2026-11-12), or the customer hung up
+        first. The team would never hear about the lead, so the application records
+        the follow-up itself: no time (it never invents one), and the customer's own
+        last words as the note for the person who calls back. Returns True if it
+        recorded one. Safe to call more than once."""
+        script = self._state_machine.script
+        reached = [s for s in script.followup_backstop_states if s in self._visited]
+        if self._followup_saved or not reached or "DO_NOT_CALL" in self._visited:
+            return False
+        said = [t.text.strip() for t in self._context.history if t.speaker == "customer" and t.text.strip()][-4:]
+        notes = ("Saved automatically: the agent did not record a time for this follow-up. "
+                 "Customer's last words: " + " / ".join(said))[:900]
+        ctx = ToolContext(
+            session=session, tenant_id=tenant_id, campaign_id=campaign_id, lead_id=lead_id,
+            conversation_id=conversation_id, script_version=script.version, current_state=reached[0],
+            allowed_tools=frozenset(script.allowed_tools(reached[0])),
+        )
+        result = await self._tools.invoke(ctx, "schedule_callback", {"requested_time": None, "notes": notes})
+        self._followup_saved = result.success
+        logger.warning("followup_backstop_recorded" if result.success else "followup_backstop_failed",
+                       extra={"conversation_id": str(conversation_id), "state": reached[0]})
+        return result.success
 
     def _is_local_dnc_guess(self, proposal: AgentResponseProposal) -> bool:
         """A do-not-call proposal the application doesn't trust. A real DNC request in
@@ -623,6 +663,15 @@ class ConversationEngine:
         the state the agent's proposal transitions *to* (that's reflected in the next
         turn's own `state` instead, and in Conversation.current_state)."""
         conversation_id = UUID(self._context.conversation_id)
+        # Token counts of the reply just produced, for the per-call cost estimate. Not
+        # for scripted lines (no model call), and read once, so one reply is never
+        # counted on two turns.
+        usage = None
+        if proposal.intent not in ("scripted_opening", "do_not_call_request"):
+            usage = getattr(self._llm, "last_usage", None)
+            if usage is not None:
+                with contextlib.suppress(Exception):
+                    self._llm.last_usage = None
 
         async def _write() -> None:
             try:
@@ -657,7 +706,7 @@ class ConversationEngine:
                         # here (seen with small local models) used to make the whole
                         # turn's transcript write fail.
                         intent=(proposal.intent or "")[:100] or None,
-                        raw_llm_output=proposal.model_dump(),
+                        raw_llm_output={**proposal.model_dump(), **({"_usage": usage} if usage else {})},
                     )
                     bg_session.add(agent_turn)
                     await bg_session.flush()

@@ -27,7 +27,7 @@ from uuid import UUID
 
 from config.settings import get_settings
 from orchestrator.engine import ConversationEngine
-from speech.stt.base import STTProvider
+from speech.stt.base import STTProvider, TranscriptResult
 from speech.tts.base import TTSProvider
 from telephony.base import TelephonyProvider
 from voice.audio.processing import (
@@ -118,6 +118,10 @@ class VoiceSession:
         # agent "got stuck" after the customer spoke, then audio arrived in a burst).
         self._turns: asyncio.Queue = asyncio.Queue()
         self._turn_worker: asyncio.Task | None = None
+        # The transcript asked for during the current pause (settings.early_transcript_ms),
+        # and those of earlier pauses in the same turn after which the customer went on.
+        self._early_transcript: asyncio.Future | None = None
+        self._carried_transcripts: list[asyncio.Future] = []
 
     async def start(self) -> None:
         # Not awaited: the greeting starts while the STT socket connects (~0.5 s that
@@ -261,6 +265,7 @@ class VoiceSession:
         if is_speech:
             self._last_activity = asyncio.get_event_loop().time()
         event = self._turn_taker.feed(is_speech, VAD_FRAME_MS)
+        event = self._early_transcript_step(is_speech, event)
 
         if event == TurnEvent.SPEECH_STARTED:
             self._overlap_speech_ms = 0
@@ -291,11 +296,44 @@ class VoiceSession:
             # ("haan", "okay") — but can be a real "no". Decided once it's transcribed.
             self._queue_turn(talked_over=self._agent_speaking() and not self._barged_in_this_utterance)
 
+    def _early_transcript_step(self, is_speech: bool, event: TurnEvent | None) -> TurnEvent | None:
+        """Start transcribing during the pause that may end the turn, and end the turn
+        sooner after a short, complete answer (settings.early_transcript_ms,
+        short_reply_end_of_turn_ms). Returns the turn event to act on."""
+        early_ms = self._settings.early_transcript_ms
+        if not early_ms or event in (TurnEvent.TURN_ENDED, TurnEvent.MAX_TURN_REACHED):
+            return event
+        if is_speech or event == TurnEvent.SPEECH_STARTED:
+            if self._early_transcript is not None:
+                # They went on talking: what was heard before the pause is the first
+                # part of this turn.
+                self._carried_transcripts.append(self._early_transcript)
+                self._early_transcript = None
+            return event
+        taker = self._turn_taker
+        if not taker.speech_in_progress:
+            return event
+        if self._early_transcript is None:
+            if taker.silence_ms >= early_ms and taker.speech_ms >= self._settings.vad_min_speech_segment_ms:
+                self._early_transcript = asyncio.ensure_future(self._receive_final())
+            return event
+        short_ms = self._settings.short_reply_end_of_turn_ms
+        if short_ms and taker.silence_ms >= short_ms and self._early_transcript.done() and not self._carried_transcripts:
+            heard = self._early_transcript.result()  # _receive_final never raises
+            words = len(heard.text.split()) if heard else 0
+            if 0 < words <= self._settings.short_reply_max_words:
+                taker.end_now()
+                return TurnEvent.TURN_ENDED
+        return event
+
     def _queue_turn(self, talked_over: bool) -> None:
-        # The transcript request starts *now*, so it covers exactly this utterance
-        # (the realtime STT commits its buffer on the request), even if an earlier
-        # turn is still being answered.
-        transcript = asyncio.ensure_future(self._receive_final())
+        # The transcript request starts *now* (or started during the pause — see
+        # _early_transcript_step), so it covers exactly this utterance (the realtime STT
+        # commits its buffer on the request), even if an earlier turn is still being
+        # answered.
+        parts = [*self._carried_transcripts, self._early_transcript or asyncio.ensure_future(self._receive_final())]
+        self._carried_transcripts, self._early_transcript = [], None
+        transcript = parts[0] if len(parts) == 1 else asyncio.ensure_future(_joined(parts))
         self._turns.put_nowait((transcript, talked_over))
         if self._turn_worker is None or self._turn_worker.done():
             self._turn_worker = asyncio.create_task(self._process_turns())
@@ -547,8 +585,25 @@ class VoiceSession:
         finally:
             await audio.aclose()  # cancels any synthesis still in flight
 
+    async def _save_pending_followup(self) -> None:
+        """An interested lead must never be lost because the model forgot to record the
+        follow-up (ConversationEngine.save_pending_followup). Best effort."""
+        if self._engine is None or self._session_factory is None:
+            return
+        try:
+            async with self._session_factory() as session:
+                await self._engine.save_pending_followup(
+                    session=session, tenant_id=self._identity.tenant_id, campaign_id=self._identity.campaign_id,
+                    lead_id=self._identity.lead_id, conversation_id=self._identity.conversation_id,
+                )
+        except Exception:  # noqa: BLE001 - closing the call must not fail over this
+            logger.exception("followup_backstop_failed", extra={"call_id": self._identity.provider_call_id})
+
     async def close(self) -> None:
+        first_close = not self._ended
         self._ended = True
+        if first_close:
+            await self._save_pending_followup()
         current = asyncio.current_task()  # close() may run inside the turn worker
         for task in [*self._background, self._turn_worker]:
             if task is not None and task is not current:
@@ -567,3 +622,13 @@ class VoiceSession:
 
 async def _once(pcm: bytes) -> AsyncIterator[bytes]:
     yield pcm
+
+
+async def _joined(parts: list) -> TranscriptResult | None:
+    """One transcript from the pieces of a turn the customer paused in."""
+    texts = []
+    for part in parts:
+        result = await part
+        if result is not None and result.text.strip():
+            texts.append(result.text.strip())
+    return TranscriptResult(text=" ".join(texts), is_final=True) if texts else None

@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from apps.api.routers import campaigns, console, demo, flows, health, leads, media, webhooks
+from apps.api.routers import campaigns, console, console_admin, demo, flows, health, leads, media, webhooks
 from config.settings import get_settings
 from observability.logging.logging_config import configure_logging
 from observability.tracing.tracing import configure_tracing
@@ -47,10 +47,31 @@ async def _prepare_ai_backends() -> None:
             logger.warning("local_model_unavailable", extra={"model": name, "error": f"{type(exc).__name__}: {exc}"[:300]})
 
 
+async def _apply_linked_accounts() -> None:
+    """Provider accounts linked from the console override .env (services/accounts)."""
+    from sqlalchemy import select
+
+    from database.models import Tenant
+    from database.session import session_scope
+    from services.accounts import runtime
+
+    s = get_settings()
+    try:
+        async with session_scope() as session:
+            tenant = (await session.execute(
+                select(Tenant).where(Tenant.name == (s.console_tenant_name or "Console"))
+            )).scalar_one_or_none()
+            if tenant is not None:
+                await runtime.refresh(session, tenant.id)
+    except Exception:  # noqa: BLE001 - the server must still start (with .env's keys)
+        logger.exception("linked_accounts_not_applied")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     configure_logging()
     configure_tracing()
+    await _apply_linked_accounts()
     warmup = asyncio.create_task(_prepare_ai_backends())
     tasks = [warmup]
     s = get_settings()
@@ -82,3 +103,4 @@ app.include_router(media.router)
 app.include_router(demo.router)
 app.include_router(console.public_router)
 app.include_router(console.router)
+app.include_router(console_admin.router)

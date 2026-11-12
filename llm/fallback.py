@@ -26,10 +26,21 @@ class FallbackLLMProvider(LLMProvider):
         self._local = secondary or OllamaLLMProvider()
         self.backend = "openai"
 
-    async def propose(self, messages: list[LLMMessage], json_schema: dict, schema_name: str = "agent_response") -> LLMProposal:
+    @property
+    def last_usage(self) -> dict | None:
+        return getattr(self._openai, "last_usage", None) if self.backend == "openai" else None
+
+    @last_usage.setter
+    def last_usage(self, value: dict | None) -> None:
+        if hasattr(self._openai, "last_usage"):
+            self._openai.last_usage = value
+
+    async def propose(self, messages: list[LLMMessage], json_schema: dict, schema_name: str = "agent_response",
+                      max_tokens: int | None = None) -> LLMProposal:
         if use_openai():
             try:
-                result = await self._openai.propose(messages, json_schema, schema_name)
+                extra = {"max_tokens": max_tokens} if max_tokens else {}
+                result = await self._openai.propose(messages, json_schema, schema_name, **extra)
                 self.backend = "openai"
                 return result
             except Exception as exc:

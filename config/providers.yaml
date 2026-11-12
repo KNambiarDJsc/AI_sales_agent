@@ -1,0 +1,87 @@
+# The services a call runs on, as the console's Accounts page shows them: what each
+# does, which credentials it takes, where to recharge it, and what it costs.
+#
+# Adding a provider = adding an entry here (plus its adapter under telephony/, speech/
+# or llm/ if calls should use it). The console also lets the client add "other"
+# accounts of their own (a name, a recharge link and a balance to keep an eye on)
+# without touching this file.
+#
+# Prices are the providers' published list prices on the date noted, and what Vobiz
+# actually charged this account. They are used for ESTIMATES shown in the console
+# ("approx. cost per call"); the provider's own bill is the truth. Update them here
+# when a provider changes its prices.
+
+# Approximate; only used to show OpenAI's dollar prices in rupees. PLACEHOLDER — set
+# it to the rate your card is actually charged at (the console can override it).
+usd_inr: 88.0
+
+providers:
+  vobiz:
+    name: Vobiz
+    role: Phone line
+    does: "Places the phone calls and carries the audio."
+    required_for_calls: true
+    currency: INR
+    # balance: api      → read live from the provider (documented endpoint)
+    # balance: tracked  → the provider has no balance API for this kind of key: the
+    #                     client enters what they recharged and the console subtracts
+    #                     its own estimate of what calls have used since.
+    balance: api
+    recharge_url: "https://console.vobiz.ai"
+    dashboard_url: "https://console.vobiz.ai"
+    credentials:
+      - {field: auth_id, setting: vobiz_auth_id, label: "Auth ID", secret: false}
+      - {field: auth_token, setting: vobiz_auth_token, label: "Auth token", secret: true}
+      - {field: from_number, setting: vobiz_from_number, label: "Calling number (+91…)", secret: false}
+    help: "console.vobiz.ai → Dashboard shows the Auth ID and Auth token; the calling number is under Numbers."
+
+  sarvam:
+    name: Sarvam AI
+    role: Hindi voice and listening
+    does: "Understands the customer's Hindi / Hinglish and speaks the agent's replies in an Indian voice."
+    required_for_calls: false   # without it OpenAI's speech is used (weaker Hindi)
+    currency: INR
+    balance: tracked
+    recharge_url: "https://indus.sarvam.ai/pricing/buy-credits"
+    dashboard_url: "https://dashboard.sarvam.ai"
+    credentials:
+      - {field: api_key, setting: sarvam_api_key, label: "API subscription key", secret: true}
+    help: "dashboard.sarvam.ai → API keys."
+
+  openai:
+    name: OpenAI
+    role: The agent's brain
+    does: "Decides what the agent says on every turn, and reads uploaded scripts. Also the backup voice if Sarvam is not linked."
+    required_for_calls: true
+    currency: USD
+    balance: tracked
+    recharge_url: "https://platform.openai.com/settings/organization/billing/overview"
+    dashboard_url: "https://platform.openai.com/usage"
+    credentials:
+      - {field: api_key, setting: openai_api_key, label: "API key (sk-…)", secret: true}
+    help: "platform.openai.com → API keys → Create new secret key."
+
+pricing:
+  # Vobiz, this account's own CDRs (2026-10/11): ₹0.38 per started minute for the call
+  # + ₹0.06 per started minute for audio streaming; ₹0.02 when a call doesn't connect.
+  telephony:
+    vobiz: {per_minute: 0.44, increment_seconds: 60, not_connected_fee: 0.02, currency: INR}
+  # sarvam.ai/api-pricing (2026-11-12), pay-as-you-go.
+  stt:
+    sarvam: {per_minute: 0.49, currency: INR}
+    openai: {per_minute: 0.017, currency: USD}        # gpt-live-transcribe
+  tts:
+    sarvam: {per_1k_chars: 2.0, currency: INR}        # Bulbul v4 Flash
+    openai: {per_1k_chars: 0.015, currency: USD}      # gpt-4o-mini-tts, ≈ from its audio-token price
+  # developers.openai.com/api/docs/pricing (2026-11-12), USD per 1M tokens, standard tier.
+  llm:
+    gpt-4.1-mini: {input: 0.40, cached_input: 0.10, output: 1.60}
+    gpt-5.4-mini: {input: 0.75, cached_input: 0.075, output: 4.50}
+    gpt-5.4-nano: {input: 0.20, cached_input: 0.02, output: 1.25}
+    gpt-5-mini: {input: 0.25, cached_input: 0.025, output: 2.00}
+    gpt-4o-mini: {input: 0.15, cached_input: 0.075, output: 0.60}
+  # "Fast mode" (service_tier priority) multiplies token prices by about this.
+  llm_priority_multiplier: 2.0
+  # Used for calls made before token counts were recorded, and for the "what will a
+  # call cost" estimate: measured on this project's prompts (2026-11).
+  llm_typical_turn: {prompt_tokens: 3800, cached_tokens: 3000, completion_tokens: 130}

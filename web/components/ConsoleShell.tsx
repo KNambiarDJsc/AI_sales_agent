@@ -4,7 +4,9 @@ import { useEffect, useState, useSyncExternalStore } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
+  AlertTriangle,
   AudioWaveform,
+  FileText,
   History,
   LayoutDashboard,
   LogOut,
@@ -16,18 +18,24 @@ import {
   Wallet,
   X,
 } from "lucide-react";
-import { DEMO_URL, api, getToken, setToken, type SystemStatus } from "@/lib/api";
+import { api, demoUrl, fmtInr, getToken, setToken, type AccountsOverview } from "@/lib/api";
 import { Spinner } from "@/components/ui";
 
 const NAV = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard },
   { href: "/leads", label: "Leads", icon: Users },
+  { href: "/scripts", label: "Scripts", icon: FileText },
   { href: "/test-call", label: "Test call", icon: PhoneOutgoing },
   { href: "/calls", label: "Call history", icon: History },
+  { href: "/accounts", label: "Accounts & cost", icon: Wallet },
   { href: "/settings", label: "Settings", icon: Settings },
 ];
 
 const noSubscribe = () => () => {};
+
+export async function openDemo(params: Record<string, string> = {}) {
+  window.open(await demoUrl(params), "_blank", "noopener");
+}
 
 export function ConsoleShell({ children }: { children: React.ReactNode }) {
   const router = useRouter();
@@ -36,15 +44,18 @@ export function ConsoleShell({ children }: { children: React.ReactNode }) {
   const token = useSyncExternalStore(noSubscribe, getToken, () => null);
   const ready = !!token;
   const [open, setOpen] = useState(false);
-  const [system, setSystem] = useState<SystemStatus | null>(null);
+  const [accounts, setAccounts] = useState<AccountsOverview | null>(null);
 
   useEffect(() => {
     if (!getToken()) {
       router.replace("/login");
       return;
     }
-    api.system().then(setSystem).catch(() => {});
-    const t = setInterval(() => api.system().then(setSystem).catch(() => {}), 60_000);
+    const load = () => api.accounts().then(setAccounts).catch(() => {});
+    load();
+    const t = setInterval(() => {
+      if (document.visibilityState === "visible") load();
+    }, 60_000);
     return () => clearInterval(t);
   }, [router]);
 
@@ -57,12 +68,16 @@ export function ConsoleShell({ children }: { children: React.ReactNode }) {
   }
 
   const active = (href: string) => (href === "/" ? pathname === "/" : pathname.startsWith(href));
+  const inUse = accounts?.accounts.filter((a) => a.in_use && !a.custom) ?? [];
+  const warnings = [
+    ...(accounts?.problems ?? []),
+    ...inUse.filter((a) => a.linked && a.low).map((a) => `${a.name} balance is low — about ${a.calls_left} calls left.`),
+  ];
 
   return (
     <div className="min-h-screen lg:pl-64">
-      {/* Sidebar */}
       <aside
-        className={`fixed inset-y-0 left-0 z-40 flex w-64 flex-col border-r border-white/5 bg-ink-900/85 backdrop-blur-xl transition-transform lg:translate-x-0 ${
+        className={`fixed inset-y-0 left-0 z-40 flex w-64 flex-col border-r border-ink-700 bg-white transition-transform lg:translate-x-0 ${
           open ? "translate-x-0" : "-translate-x-full"
         }`}
       >
@@ -78,49 +93,52 @@ export function ConsoleShell({ children }: { children: React.ReactNode }) {
             <X className="h-5 w-5" />
           </button>
         </div>
-        <nav className="flex-1 space-y-1 px-3">
+        <nav className="flex-1 space-y-1 overflow-y-auto px-3">
           {NAV.map(({ href, label, icon: Icon }) => (
             <Link
               key={href}
               href={href}
               onClick={() => setOpen(false)}
-              className={`group flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition ${
-                active(href)
-                  ? "bg-gradient-to-r from-ultra/30 via-hotpink/20 to-transparent text-white shadow-[inset_2px_0_0_#ff2fa8]"
-                  : "text-haze hover:bg-white/5 hover:text-white"
+              className={`flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition ${
+                active(href) ? "bg-ultra/10 text-ultra" : "text-haze hover:bg-ink-800 hover:text-ink"
               }`}
             >
-              <Icon className={`h-[18px] w-[18px] ${active(href) ? "text-hotpink" : ""}`} />
+              <Icon className="h-[18px] w-[18px]" />
               {label}
             </Link>
           ))}
-          <a
-            href={DEMO_URL}
-            target="_blank"
-            rel="noreferrer"
-            className="mt-4 flex items-center gap-3 rounded-xl border border-cyanx/25 bg-cyanx/[0.07] px-3 py-2.5 text-sm font-medium text-cyan-100 transition hover:bg-cyanx/15"
+          <button
+            onClick={() => openDemo()}
+            className="mt-4 flex w-full items-center gap-3 rounded-xl border border-cyanx/25 bg-cyanx/[0.06] px-3 py-2.5 text-left text-sm font-medium text-cyan-800 transition hover:bg-cyanx/15"
           >
             <Mic className="h-[18px] w-[18px] text-cyanx" />
             <span>
               Try the voice demo
               <span className="block text-[11px] font-normal text-haze">Talk to the agent in your browser</span>
             </span>
-          </a>
+          </button>
         </nav>
         <div className="space-y-3 p-4">
-          {system && (
-            <div className="rounded-xl border border-white/8 bg-white/[0.03] p-3 text-xs">
-              <div className="flex items-center justify-between text-haze">
-                <span className="flex items-center gap-1.5"><Wallet className="h-3.5 w-3.5" /> Call balance</span>
-                <span className="font-display text-sm font-semibold text-volt">
-                  {system.balance == null ? "—" : `₹${system.balance.toFixed(2)}`}
-                </span>
-              </div>
-              <div className="mt-2 flex items-center gap-1.5 text-haze">
-                <span className={`h-1.5 w-1.5 rounded-full ${system.public_url_ok ? "bg-volt" : "bg-amber-400"}`} />
-                {system.public_url_ok ? "Ready to dial" : "Public URL not set"}
-              </div>
-            </div>
+          {accounts && (
+            <Link href="/accounts" className="block rounded-xl border border-ink-700 bg-ink-950 p-3 text-xs hover:border-ultra/40">
+              <p className="mb-2 font-semibold uppercase tracking-wider text-haze">Balances</p>
+              <ul className="space-y-1.5">
+                {inUse.map((a) => (
+                  <li key={a.id} className="flex items-center justify-between gap-2">
+                    <span className="flex items-center gap-1.5 text-haze">
+                      <span className={`h-1.5 w-1.5 rounded-full ${!a.linked ? "bg-red-500" : a.low ? "bg-amber-500" : "bg-volt"}`} />
+                      {a.name}
+                    </span>
+                    <span className={`font-display font-semibold tabular-nums ${a.low ? "text-amber-700" : ""}`}>
+                      {!a.linked ? "Not linked" : a.balance ? `${a.balance_kind === "estimated" ? "~" : ""}${fmtInr(a.balance.inr, 0)}` : "Set balance"}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+              <p className="mt-2 border-t border-ink-700 pt-2 text-haze">
+                About <span className="font-semibold text-ink">{fmtInr(accounts.per_call.total)}</span> per {Math.round(accounts.per_call.seconds / 60)}-min call
+              </p>
+            </Link>
           )}
           <button
             className="btn btn-ghost w-full"
@@ -133,17 +151,30 @@ export function ConsoleShell({ children }: { children: React.ReactNode }) {
           </button>
         </div>
       </aside>
-      {open && <div className="fixed inset-0 z-30 bg-black/60 lg:hidden" onClick={() => setOpen(false)} />}
+      {open && <div className="fixed inset-0 z-30 bg-black/30 lg:hidden" onClick={() => setOpen(false)} />}
 
-      {/* Mobile top bar */}
-      <header className="sticky top-0 z-20 flex items-center gap-3 border-b border-white/5 bg-ink-950/80 px-4 py-3 backdrop-blur lg:hidden">
+      <header className="sticky top-0 z-20 flex items-center gap-3 border-b border-ink-700 bg-white px-4 py-3 lg:hidden">
         <button onClick={() => setOpen(true)} aria-label="Open menu" className="text-haze">
           <Menu className="h-6 w-6" />
         </button>
         <span className="font-display text-lg font-bold text-gradient">Dialwave</span>
       </header>
 
-      <main className="mx-auto max-w-7xl px-4 py-8 sm:px-8 sm:py-10">{children}</main>
+      <main className="mx-auto max-w-7xl px-4 py-8 sm:px-8 sm:py-10">
+        {warnings.length > 0 && !pathname.startsWith("/accounts") && (
+          <Link
+            href="/accounts"
+            className="mb-6 flex items-start gap-2 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-800 hover:bg-amber-100"
+          >
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+            <span>
+              {warnings[0]}
+              {warnings.length > 1 && ` (+${warnings.length - 1} more)`} <span className="font-semibold underline">Open Accounts</span>
+            </span>
+          </Link>
+        )}
+        {children}
+      </main>
     </div>
   );
 }

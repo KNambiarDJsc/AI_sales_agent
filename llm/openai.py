@@ -14,13 +14,19 @@ logger = logging.getLogger(__name__)
 
 
 class OpenAILLMProvider(LLMProvider):
-    def __init__(self) -> None:
+    def __init__(self, model: str | None = None, reasoning_effort: str | None = None,
+                 service_tier: str | None = None) -> None:
+        """The overrides are for one-off jobs off the call path (reading an uploaded
+        script); calls always use the configured model."""
         settings = get_settings()
-        self._model = settings.openai_llm_model
-        self._reasoning_effort = settings.openai_llm_reasoning_effort
-        self._service_tier = settings.openai_llm_service_tier
+        self._model = model or settings.openai_llm_model
+        self._reasoning_effort = settings.openai_llm_reasoning_effort if reasoning_effort is None else reasoning_effort
+        self._service_tier = settings.openai_llm_service_tier if service_tier is None else service_tier
         self._max_tokens = settings.openai_llm_max_tokens
         self._temperature = settings.openai_llm_temperature
+        # Token counts of the latest streamed reply, for the per-call cost estimate
+        # (services/accounts/costs.py). None until a reply has finished.
+        self.last_usage: dict | None = None
 
     def _request_kwargs(self, messages: list[LLMMessage], schema_name: str, json_schema: dict) -> dict:
         kwargs = {
@@ -48,11 +54,13 @@ class OpenAILLMProvider(LLMProvider):
         messages: list[LLMMessage],
         json_schema: dict,
         schema_name: str = "agent_response",
+        max_tokens: int | None = None,
     ) -> LLMProposal:
         start = time.monotonic()
-        response = await get_openai_client().chat.completions.create(
-            **self._request_kwargs(messages, schema_name, json_schema)
-        )
+        kwargs = self._request_kwargs(messages, schema_name, json_schema)
+        if max_tokens:  # a one-off longer answer (services/scripts/compiler.py), not a call turn
+            kwargs["max_completion_tokens"] = max_tokens
+        response = await get_openai_client().chat.completions.create(**kwargs)
         latency_ms = (time.monotonic() - start) * 1000
         choice = response.choices[0]
         raw_text = choice.message.content or ""
@@ -89,6 +97,9 @@ class OpenAILLMProvider(LLMProvider):
         async for chunk in stream:
             if getattr(chunk, "usage", None):
                 details = getattr(chunk.usage, "prompt_tokens_details", None)
+                self.last_usage = {"model": self._model, "prompt_tokens": chunk.usage.prompt_tokens,
+                                   "cached_tokens": getattr(details, "cached_tokens", None) or 0,
+                                   "completion_tokens": getattr(chunk.usage, "completion_tokens", None) or 0}
                 logger.info("llm_usage", extra={"prompt_tokens": chunk.usage.prompt_tokens,
                                                 "cached_tokens": getattr(details, "cached_tokens", None),
                                                 "seconds": round(loop.time() - started, 3)})

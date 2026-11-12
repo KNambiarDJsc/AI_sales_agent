@@ -7,6 +7,7 @@ import {
   FileSpreadsheet,
   Phone,
   Plus,
+  RotateCcw,
   Search,
   Trash2,
   UploadCloud,
@@ -15,6 +16,44 @@ import {
 import { api, download, fmtTime, type Lead } from "@/lib/api";
 import { usePoll } from "@/lib/usePoll";
 import { Empty, ErrorNote, PageHeader, ResultChip, Spinner } from "@/components/ui";
+
+function BulkActions({ leads, onDone }: { leads: Lead[]; onDone: () => void }) {
+  const [note, setNote] = useState<string | null>(null);
+  const unanswered = leads.filter((l) => l.status === "failed").length;
+  const uncalled = leads.filter((l) => l.status === "pending" && l.attempts === 0).length;
+  return (
+    <>
+      {note && <span className="text-xs text-volt">{note}</span>}
+      {unanswered > 0 && (
+        <button
+          className="btn btn-ghost py-2 text-xs"
+          title="Put the leads who didn't answer back in the queue"
+          onClick={async () => {
+            const r = await api.retryUnanswered().catch(() => null);
+            setNote(r ? `${r.requeued} lead${r.requeued === 1 ? "" : "s"} back in the queue` : "Could not do that");
+            onDone();
+          }}
+        >
+          <RotateCcw className="h-3.5 w-3.5" /> Call {unanswered} unanswered again
+        </button>
+      )}
+      {uncalled > 0 && (
+        <button
+          className="btn btn-ghost py-2 text-xs text-rose-700"
+          title="Remove every lead that hasn't been called yet (for a wrong upload)"
+          onClick={async () => {
+            if (!window.confirm(`Remove all ${uncalled} leads that haven't been called yet?`)) return;
+            const r = await api.clearUncalledLeads().catch(() => null);
+            setNote(r ? `${r.deleted} removed` : "Could not do that");
+            onDone();
+          }}
+        >
+          <Trash2 className="h-3.5 w-3.5" /> Remove uncalled
+        </button>
+      )}
+    </>
+  );
+}
 
 type UploadReport = Awaited<ReturnType<typeof api.uploadLeads>>;
 
@@ -53,6 +92,7 @@ export default function LeadsPage() {
           <h2 className="mr-auto font-display text-lg font-semibold">
             All leads <span className="text-haze">({leads?.length ?? 0})</span>
           </h2>
+          <BulkActions leads={leads ?? []} onDone={refresh} />
           <div className="relative">
             <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-haze" />
             <input className="input w-56 py-2 pl-9" placeholder="Search" value={query} onChange={(e) => setQuery(e.target.value)} />
@@ -64,7 +104,7 @@ export default function LeadsPage() {
               key={f}
               onClick={() => setFilter(f)}
               className={`rounded-full px-3 py-1 text-xs font-semibold transition ${
-                filter === f ? "bg-brand text-white" : "bg-white/5 text-haze hover:bg-white/10"
+                filter === f ? "bg-brand text-white" : "bg-black/5 text-haze hover:bg-black/10"
               }`}
             >
               {f}
@@ -118,7 +158,7 @@ function LeadRow({ lead, onChange }: { lead: Lead; onChange: () => void }) {
           {lead.category && <span className="ml-1.5 rounded bg-ultra/20 px-1.5 py-px text-[10px] text-violet-200">{lead.category}</span>}
         </p>
       </td>
-      <td className="px-3 py-3 font-mono text-xs text-zinc-300">{lead.phone}</td>
+      <td className="px-3 py-3 font-mono text-xs text-zinc-700">{lead.phone}</td>
       <td className="px-3 py-3">
         <ResultChip result={lead.result} />
         {lead.summary && <p className="mt-1 max-w-xs truncate text-xs text-haze" title={lead.summary}>{lead.summary}</p>}
@@ -202,10 +242,10 @@ function Uploader({ onDone }: { onDone: () => void }) {
           upload(e.dataTransfer.files[0]);
         }}
         className={`flex w-full flex-col items-center justify-center gap-2 rounded-2xl border-2 border-dashed px-4 py-10 transition ${
-          drag ? "border-hotpink bg-hotpink/10" : "border-white/12 hover:border-ultra/60 hover:bg-white/[0.02]"
+          drag ? "border-hotpink bg-hotpink/10" : "border-black/12 hover:border-ultra/60 hover:bg-black/[0.02]"
         }`}
       >
-        {busy ? <Spinner className="h-8 w-8 text-hotpink" /> : <UploadCloud className="h-9 w-9 text-hotpink" />}
+        {busy ? <Spinner className="h-8 w-8 text-ultra" /> : <UploadCloud className="h-9 w-9 text-ultra" />}
         <span className="font-medium">{busy ? "Importing…" : "Drop your Excel here or click to browse"}</span>
         <span className="text-xs text-haze">Max 5 MB · duplicates and do-not-call numbers are skipped</span>
       </button>
@@ -217,7 +257,7 @@ function Uploader({ onDone }: { onDone: () => void }) {
             <p className="flex items-center gap-2 font-semibold text-volt">
               <CheckCircle2 className="h-4 w-4" /> {report.created} new lead{report.created === 1 ? "" : "s"} added
             </p>
-            <p className="mt-1 text-lime-100/80">
+            <p className="mt-1 text-green-800">
               {report.rows} rows read
               {report.skipped_existing ? ` · ${report.skipped_existing} already in the list` : ""}
               {report.duplicates_in_file ? ` · ${report.duplicates_in_file} duplicates in the file` : ""}
@@ -225,7 +265,7 @@ function Uploader({ onDone }: { onDone: () => void }) {
               {report.errors.length ? ` · ${report.errors.length} rows with problems` : ""}
             </p>
             {report.errors.length > 0 && (
-              <ul className="mt-2 max-h-28 space-y-0.5 overflow-y-auto text-xs text-rose-200">
+              <ul className="mt-2 max-h-28 space-y-0.5 overflow-y-auto text-xs text-rose-700">
                 {report.errors.map((e) => (
                   <li key={e.row}>Row {e.row}: {e.reason}</li>
                 ))}

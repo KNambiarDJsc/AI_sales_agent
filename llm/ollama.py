@@ -62,7 +62,8 @@ class OllamaLLMProvider(LLMProvider):
             payload["think"] = self._think
         return payload
 
-    async def propose(self, messages: list[LLMMessage], json_schema: dict, schema_name: str = "agent_response") -> LLMProposal:
+    async def propose(self, messages: list[LLMMessage], json_schema: dict, schema_name: str = "agent_response",
+                      max_tokens: int | None = None) -> LLMProposal:
         start = time.monotonic()
         async with httpx.AsyncClient(timeout=self._timeout) as client:
             resp = await client.post(f"{self._base_url}/api/chat", json=self._payload(messages, json_schema, stream=False))

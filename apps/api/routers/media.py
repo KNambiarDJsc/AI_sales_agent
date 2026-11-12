@@ -31,7 +31,6 @@ import uuid
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from config.settings import PROMPTS_DIR
 from database.models import CallAttempt, Campaign, Conversation, Lead
 from database.repositories.call_repository import CallRepository
 from database.session import session_scope
@@ -39,8 +38,8 @@ from services.call_worker.lifecycle import finalize_call
 from llm.factory import get_llm_provider
 from orchestrator.context import ConversationContext
 from orchestrator.engine import ConversationEngine
-from orchestrator.prompts import load_campaign_prompt
-from orchestrator.state_machine import StateMachine, load_script_by_id
+from orchestrator.state_machine import StateMachine
+from services.scripts.store import flow_for_campaign
 from speech.stt.factory import get_stt_provider
 from speech.tts.factory import get_tts_provider
 from telephony.base import TelephonyProvider
@@ -75,9 +74,8 @@ async def _resolve_attempt_and_build_session(
         if campaign is None or lead is None:
             return None
 
-        script = load_script_by_id(campaign.script_id)
-        campaign_prompt_path = campaign.config.get("campaign_prompt_path") or (PROMPTS_DIR / "campaign_prompt_template.yaml")
-        campaign_prompt = load_campaign_prompt(campaign_prompt_path)
+        # The flow, with the call script in use applied (services/scripts/store.py).
+        script, campaign_prompt, script_values = await flow_for_campaign(session, campaign)
 
         conversation = Conversation(
             call_attempt_id=attempt.id,
@@ -96,7 +94,7 @@ async def _resolve_attempt_and_build_session(
             script_id=script.script_id,
             script_version=script.version,
             current_state="INTRO",
-            lead_fields=lead_fields(lead.contact_name, lead.business_name, lead.extra),
+            lead_fields={**lead_fields(lead.contact_name, lead.business_name, lead.extra), **script_values},
             campaign_prompt=campaign_prompt,
             timezone=campaign.timezone,
         )

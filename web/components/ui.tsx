@@ -5,16 +5,16 @@ import type { Result } from "@/lib/api";
 
 const RESULT_STYLE: Record<string, string> = {
   Interested: "bg-volt/15 text-volt border-volt/40",
-  "Callback requested": "bg-amber-400/15 text-amber-300 border-amber-400/40",
-  "Not interested": "bg-rose-400/12 text-rose-300 border-rose-400/35",
-  "Do not call": "bg-red-500/15 text-red-300 border-red-500/45",
+  "Callback requested": "bg-amber-400/15 text-amber-700 border-amber-400/40",
+  "Not interested": "bg-rose-400/12 text-rose-700 border-rose-400/35",
+  "Do not call": "bg-red-500/15 text-red-700 border-red-500/45",
   Unclear: "bg-cyanx/12 text-cyanx border-cyanx/35",
-  "Calling…": "bg-hotpink/15 text-pink-200 border-hotpink/50",
-  "Not called yet": "bg-white/5 text-haze border-white/10",
+  "Calling…": "bg-hotpink/15 text-pink-700 border-hotpink/50",
+  "Not called yet": "bg-black/5 text-haze border-black/10",
 };
 
 export function ResultChip({ result }: { result: Result | string }) {
-  const style = RESULT_STYLE[result] ?? "bg-white/5 text-zinc-300 border-white/12";
+  const style = RESULT_STYLE[result] ?? "bg-black/5 text-zinc-700 border-black/12";
   return (
     <span className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs font-semibold ${style}`}>
       {result === "Calling…" && <span className="h-1.5 w-1.5 rounded-full bg-hotpink animate-pulse" />}
@@ -31,7 +31,7 @@ export function PageHeader({ title, kicker, children }: { title: string; kicker?
   return (
     <div className="mb-8 flex flex-wrap items-end justify-between gap-4">
       <div>
-        {kicker && <p className="mb-1 text-xs font-semibold uppercase tracking-[0.2em] text-hotpink">{kicker}</p>}
+        {kicker && <p className="mb-1 text-xs font-semibold uppercase tracking-[0.2em] text-ultra">{kicker}</p>}
         <h1 className="font-display text-3xl font-bold tracking-tight sm:text-4xl">{title}</h1>
       </div>
       {children && <div className="flex flex-wrap items-center gap-2">{children}</div>}
@@ -42,7 +42,7 @@ export function PageHeader({ title, kicker, children }: { title: string; kicker?
 export function ErrorNote({ message }: { message: string | null }) {
   if (!message) return null;
   return (
-    <div className="rounded-xl border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">{message}</div>
+    <div className="rounded-xl border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-sm text-rose-700">{message}</div>
   );
 }
 
@@ -63,7 +63,7 @@ export function EqBars({ active = true }: { active?: boolean }) {
 export function Empty({ icon, title, hint }: { icon: React.ReactNode; title: string; hint?: string }) {
   return (
     <div className="flex flex-col items-center justify-center gap-2 py-14 text-center">
-      <div className="mb-2 rounded-2xl bg-white/5 p-4 text-haze">{icon}</div>
+      <div className="mb-2 rounded-2xl bg-black/5 p-4 text-haze">{icon}</div>
       <p className="font-display text-lg font-semibold">{title}</p>
       {hint && <p className="max-w-sm text-sm text-haze">{hint}</p>}
     </div>

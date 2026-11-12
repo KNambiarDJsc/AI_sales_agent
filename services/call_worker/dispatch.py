@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from database.models import CallAttempt, Campaign
 from database.repositories.call_repository import CallRepository
 from database.repositories.lead_repository import LeadRepository
+from services.scripts.store import flow_for_campaign
 from telephony.base import OutboundCallRequest, TelephonyProvider
 from voice.session.opening import lead_fields, prerecord_opening
 
@@ -102,7 +103,11 @@ async def dispatch_next_call(
     # call. The lead is already status "queued", so releasing its row lock here can't
     # let another worker claim it.
     await session.commit()
-    prerecord_opening(campaign.script_id, lead_fields(lead.contact_name, lead.business_name, lead.extra))
+    try:  # the greeting is recorded while the phone rings; never a reason not to dial
+        flow, _, script_values = await flow_for_campaign(session, campaign)
+        prerecord_opening(flow, {**lead_fields(lead.contact_name, lead.business_name, lead.extra), **script_values})
+    except Exception:  # noqa: BLE001
+        logger.exception("opening_prerecord_failed")
 
     request = OutboundCallRequest(
         to_number=lead.phone_e164,

@@ -6,6 +6,7 @@ import pytest
 
 from tests.unit.test_voice_acknowledgment import LevelTTS, Pcm16Telephony
 from tests.unit.test_voice_session_speak import FakeSTTProvider, _identity
+from orchestrator.state_machine import load_script_by_id
 from voice.session import acknowledgments, opening
 from voice.session.session import VoiceSession
 
@@ -15,7 +16,7 @@ pytestmark = pytest.mark.asyncio
 async def test_opening_is_recorded_during_ringing_and_played_without_synthesis(monkeypatch):
     tts = LevelTTS()
     monkeypatch.setattr(opening, "get_tts_provider", lambda: tts)
-    opening.prerecord_opening("seller-flow", opening.lead_fields("Naman", "Demo Business", {}))
+    opening.prerecord_opening(load_script_by_id("seller-flow"), opening.lead_fields("Naman", "Demo Business", {}))
     await asyncio.gather(*opening._tasks)
     text = "नमस्ते, क्या मेरी बात Naman जी से हो रही है, Demo Business से?"
     assert acknowledgments.cached(tts, text) is not None
@@ -39,10 +40,10 @@ async def test_missing_lead_fields_use_the_next_opening_line(monkeypatch):
     # No contact name: the line without the name, never "{contact_name}" or "None".
     calls = []
     monkeypatch.setattr(opening.acknowledgments, "prerecord_one_off", lambda *a: calls.append(a) or asyncio.sleep(0))
-    opening.prerecord_opening("seller-flow", opening.lead_fields("", "Demo Business", {}))
-    opening.prerecord_opening("seller-flow", opening.lead_fields("", "", {}))
+    opening.prerecord_opening(load_script_by_id("seller-flow"), opening.lead_fields("", "Demo Business", {}))
+    opening.prerecord_opening(load_script_by_id("seller-flow"), opening.lead_fields("", "", {}))
     await asyncio.sleep(0)
     texts = [text for _, text in calls]
     assert texts == ["नमस्ते, क्या मेरी बात Demo Business से हो रही है?",
-                     "नमस्ते, क्या आप अपने business के owner बोल रहे हैं?"]
+                     "नमस्ते, क्या मेरी बात shop के owner से हो रही है?"]
     assert all("{" not in t and "None" not in t for t in texts)

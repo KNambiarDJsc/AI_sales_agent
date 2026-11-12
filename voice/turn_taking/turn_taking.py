@@ -56,6 +56,21 @@ class TurnTaker:
     def speech_in_progress(self) -> bool:
         return self._speech_started
 
+    @property
+    def silence_ms(self) -> int:
+        """Silence so far since the customer last made a sound (0 while they talk)."""
+        return self._consecutive_silence_ms
+
+    @property
+    def speech_ms(self) -> int:
+        """Speech heard so far in this turn."""
+        return self._total_speech_ms if self._speech_started else 0
+
+    def end_now(self) -> None:
+        """End the turn before the usual silence has passed (the caller knows the
+        customer is done — see VoiceSession's short-reply endpointing)."""
+        self._reset()
+
     def feed(self, is_speech: bool, frame_ms: int) -> TurnEvent | None:
         if is_speech:
             self._consecutive_speech_ms += frame_ms

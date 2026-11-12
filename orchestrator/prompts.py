@@ -63,9 +63,44 @@ def _configured(value: object) -> str:
     return text
 
 
+# How the agent talks, per the call script's language style (ScriptConfig.speech_style).
+# The client's feedback on the first Hindi calls (2026-11-03): "pure Hindi nahi chalega
+# — 'interested ho' instead of 'ruchi hai'". Shop owners hear textbook Hindi as a
+# recording; this is how sales callers in Indian cities actually talk.
+_HINGLISH_STYLE = (
+    "Speaking style — Hinglish: Hindi sentences written in Devanagari, with the everyday English words "
+    "people really use on business calls kept in English letters: interested, available, time, call, team, "
+    "order, delivery, pickup, payment, free, charge, account, registration, brand, shop, demand, issue, "
+    "price, policy, sir. Never use formal or textbook Hindi for these (रुचि, इच्छुक, उपलब्ध, पंजीकरण, वितरण, "
+    "शुल्क, निःशुल्क, भुगतान, विज्ञापन, समस्या, नीति, व्यवसाय, उत्पाद) — say interested, available, registration, "
+    "delivery, charge, free, payment, advertisement, issue, policy, business, product. Say \"क्या आप "
+    "interested रहेंगे?\", never \"क्या आपकी रुचि है?\". Warm and respectful (Sir / जी), short sentences."
+)
+_STYLE_TEXT = {
+    "hinglish": _HINGLISH_STYLE,
+    "hindi": ("Speaking style — simple everyday spoken Hindi in Devanagari, the way people talk on the phone; "
+              "brand names and words with no common Hindi form (Amazon, online, GST) stay in English."),
+    "english": "Speaking style — clear, simple Indian English; short sentences.",
+}
+_HINDI_REPLY = {
+    "hinglish": "reply in everyday Hinglish (Hindi in Devanagari, common English business words in English)",
+    "": "reply in simple, everyday spoken Hindi",
+}
+
+
+def _hindi_reply_style(script: ScriptConfig) -> str:
+    return _HINDI_REPLY.get(script.speech_style, _HINDI_REPLY[""])
+
+
 def _language_instruction(script: ScriptConfig) -> str:
     """The call's language rule, from the script's `language` / `language_policy` /
-    `supported_languages` (config)."""
+    `supported_languages` (config) and its speaking style."""
+    text = _language_rule(script)
+    style = _STYLE_TEXT.get(script.speech_style)
+    return f"{text}\n{style}" if style else text
+
+
+def _language_rule(script: ScriptConfig) -> str:
     default = _LANGUAGE_NAMES.get(script.language, script.language)
     if script.language_policy != "match_customer":
         return (
@@ -123,7 +158,7 @@ def _reply_language_hint(script: ScriptConfig, customer_lines: list[str]) -> str
         return ""
     found = language.detect(customer_lines[-1]) if customer_lines else None
     if found == language.HINDI:
-        return "Reply language: the customer is speaking Hindi, so reply in simple, everyday spoken Hindi."
+        return f"Reply language: the customer is speaking Hindi, so {_hindi_reply_style(script)}."
     if found == language.HINGLISH:
         # Asked for "Hinglish", the model mirrored the customer's English letters ("main
         # aapko call kar rahi hoon"), which the voice mispronounces. Spoken, Devanagari
@@ -136,8 +171,10 @@ def _reply_language_hint(script: ScriptConfig, customer_lines: list[str]) -> str
         return ("Reply language: the customer's latest message is English, so this whole reply must be in "
                 "English, even though the call started in Hindi.")
     earlier = language.latest(customer_lines[:-1])
-    name = {language.HINDI: "Hindi", language.HINGLISH: "Hinglish", language.ENGLISH: "English"}.get(
-        earlier, _LANGUAGE_NAMES.get(script.language, script.language))
+    hindi_name = "Hinglish" if script.speech_style == "hinglish" else "Hindi"
+    default_name = hindi_name if script.language.startswith("hi") else _LANGUAGE_NAMES.get(script.language, script.language)
+    name = {language.HINDI: hindi_name, language.HINGLISH: "Hinglish", language.ENGLISH: "English"}.get(
+        earlier, default_name)
     return (f"Reply language: the customer's latest message is too short to show a language, so keep "
             f"replying in {name}.")
 
@@ -162,6 +199,52 @@ def _knowledge_lines(campaign_prompt: dict) -> list[str]:
     return lines
 
 
+def _identity_lines(campaign_prompt: dict) -> list[str]:
+    """Who the agent is on this call, from the call script (orchestrator/call_script.py)."""
+    name = str(campaign_prompt.get("agent_name") or "").strip()
+    company = str(campaign_prompt.get("company_name") or "").strip()
+    if not (name or company):
+        return []
+    who = " and ".join(x for x in (f"your name is {name}" if name else "", f"you are calling from {company}" if company else "") if x)
+    return [f"On this call {who}. Say it only as the call script does, or when asked who is calling."]
+
+
+def _call_script_lines(campaign_prompt: dict, lead_fields: dict | None = None) -> list[str]:
+    """The client's call script — a built-in one or their own upload. It is their
+    document, shown to the model as-is; how to use it is spelled out here because an
+    uploaded script is written for a human caller (long paragraphs, stage directions)."""
+    script = str(campaign_prompt.get("call_script") or "").strip()
+    if not script:
+        return []
+    known = {k: v for k, v in (lead_fields or {}).items() if str(v or "").strip()}
+    try:
+        script = substitute_placeholders(script, known)
+    except (ValueError, IndexError, KeyError):
+        pass  # stray braces in the client's own text: leave it exactly as written
+    return [
+        "",
+        "CALL SCRIPT — written by the client for this campaign. It is what you say on this call:",
+        "- Follow its steps and branches in order. The current conversation state tells you which part "
+        "of the call you are in; the script tells you what to say there.",
+        "- Say its points in your own short spoken sentences, in the reply language — never read it out "
+        "word for word, never read a whole paragraph in one reply, and never speak its instructions, "
+        "headings or blanks aloud.",
+        "- One step per reply. Give the pitch in two or three short replies with the customer answering "
+        "in between, not as one speech.",
+        "- Facts (prices, timelines, offers, policies) come only from this script and the verified "
+        "knowledge below. If the customer asks something neither covers, say the team will explain it "
+        "on their call.",
+        "- If the script and the customer's situation don't match, be sensible and helpful: answer what "
+        "they asked, then return to the script.",
+        "- A blank in curly braces that is still in the script (like {brand}) is a detail we don't have for "
+        "this lead: say the sentence without it, never the braces or the word inside them.",
+        "<call_script>",
+        script,
+        "</call_script>",
+        "",
+    ]
+
+
 def _static_system_text(script: ScriptConfig, context: ConversationContext) -> str:
     """Everything identical on every turn of a call (and across calls of a campaign)."""
     system_prompt = _load_system_prompt()
@@ -169,6 +252,7 @@ def _static_system_text(script: ScriptConfig, context: ConversationContext) -> s
     # this cached static part; the clock and state are in _turn_context_text.
     parts = [
         system_prompt["role"],
+        *_identity_lines(context.campaign_prompt),
         f"Identity disclosure requirement: {_configured(system_prompt.get('identity_disclosure'))}",
         _language_instruction(script),
         *(
@@ -181,6 +265,7 @@ def _static_system_text(script: ScriptConfig, context: ConversationContext) -> s
         "",
         f"Campaign product info: {_configured(context.campaign_prompt.get('product_info'))}",
         f"Target customer: {_configured(context.campaign_prompt.get('target_customer'))}",
+        *_call_script_lines(context.campaign_prompt, context.lead_fields),
         *_knowledge_lines(context.campaign_prompt),
         "",
         system_prompt["output_contract"],

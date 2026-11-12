@@ -2,8 +2,8 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowRight, AudioWaveform, Lock, Mic, User } from "lucide-react";
-import { DEMO_URL, api, setToken } from "@/lib/api";
+import { ArrowRight, AudioWaveform, Lock, User } from "lucide-react";
+import { api, setToken } from "@/lib/api";
 import { ErrorNote, Spinner } from "@/components/ui";
 
 export default function LoginPage() {
@@ -31,7 +31,7 @@ export default function LoginPage() {
     <main className="flex min-h-screen items-center justify-center px-4">
       <div className="w-full max-w-md">
         <div className="mb-10 text-center">
-          <div className="mx-auto mb-5 flex h-16 w-16 items-center justify-center rounded-2xl bg-brand shadow-[0_10px_40px_-8px_rgb(255_47_168/0.8)]">
+          <div className="mx-auto mb-5 flex h-16 w-16 items-center justify-center rounded-2xl bg-brand shadow-[0_10px_30px_-10px_rgb(106_77_245/0.7)]">
             <AudioWaveform className="h-8 w-8 text-white" />
           </div>
           <h1 className="font-display text-4xl font-bold tracking-tight">
@@ -75,9 +75,6 @@ export default function LoginPage() {
             {busy ? <Spinner /> : <>Enter console <ArrowRight className="h-4 w-4" /></>}
           </button>
         </form>
-        <a href={DEMO_URL} target="_blank" rel="noreferrer" className="mt-6 flex items-center justify-center gap-2 text-sm text-haze hover:text-white">
-          <Mic className="h-4 w-4 text-cyanx" /> Want to test it first? <span className="font-semibold text-cyanx underline-offset-4 hover:underline">Try the voice demo</span>
-        </a>
       </div>
     </main>
   );

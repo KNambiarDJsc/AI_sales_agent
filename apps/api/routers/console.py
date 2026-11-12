@@ -21,7 +21,7 @@ import io
 import logging
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 import pandas as pd
@@ -29,7 +29,7 @@ import phonenumbers
 from fastapi import APIRouter, Depends, HTTPException, Response, UploadFile
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 
 from apps.api.console_auth import issue_token, password_is_correct, require_console
@@ -39,7 +39,10 @@ from database.session import session_scope
 from database.repositories.call_repository import CallRepository
 from services.call_worker.dispatch import dispatch_next_call
 from services.call_worker.lifecycle import finalize_call
+from services.accounts import runtime as accounts_runtime
+from services.accounts import usage
 from services.campaign.service import CampaignService
+from services.scripts import store as script_store
 from services.lead_import.importer import guess_column_mapping, import_leads
 from telephony.base import CallStatus
 from telephony.factory import get_telephony_provider
@@ -92,6 +95,8 @@ async def _campaigns(session) -> tuple[Campaign, Campaign]:
         if found[name].script_id != s.console_script_id:  # the configured flow changed
             found[name].script_id = s.console_script_id
             found[name].config = {**found[name].config, "campaign_prompt_path": s.console_campaign_prompt}
+        if found[name].telephony_provider != s.telephony_provider:
+            found[name].telephony_provider = s.telephony_provider
     await session.flush()
     return found[LEADS_CAMPAIGN], found[TEST_CAMPAIGN]
 
@@ -131,6 +136,9 @@ async def _public_url_reachable() -> bool:
 
 
 async def _dispatch_one(session, campaign: Campaign) -> bool:
+    problems = accounts_runtime.blocking_problems()
+    if problems:
+        raise HTTPException(status_code=503, detail=problems[0])
     base = _public_base()
     if not base.startswith("https://"):
         raise HTTPException(status_code=503, detail="Server has no public https URL (PUBLIC_BASE_URL) — start the tunnel")
@@ -168,8 +176,10 @@ async def login(body: LoginBody) -> dict:
 # --------------------------------------------------------------------------- overview
 
 
-def _row_dict(row: CallRow) -> dict:
+def _row_dict(row: CallRow, cost: dict | None = None) -> dict:
     return {
+        "cost": cost["total"] if cost else None, "cost_parts": cost["parts"] if cost else None,
+        "cost_phone_actual": bool(cost and cost["phone_is_actual"]),
         "attempt_id": row.attempt_id, "lead_id": row.lead_id, "time": row.call_time.isoformat() if row.call_time else None,
         "name": row.name, "business": row.business, "phone": row.phone, "result": row.agreed,
         "outcome": row.outcome, "status": row.call_status, "talk_seconds": row.talk_seconds,
@@ -231,11 +241,33 @@ async def overview() -> dict:
         )).all())
         campaign = {"status": leads_c.status, "call_window_start": leads_c.call_window_start,
                     "call_window_end": leads_c.call_window_end, "timezone": leads_c.timezone}
+        tenant_id = leads_c.tenant_id
+        active_script = await script_store.call_script_for(session, leads_c)
+        dialer = await _dialer_settings(session, tenant_id)
+        retry_waiting = (await session.execute(
+            select(func.count()).select_from(Lead).where(
+                Lead.campaign_id == leads_c.id, Lead.status == "failed", Lead.attempts_count < dialer["max_attempts"])
+        )).scalar_one()
     results: dict[str, int] = {}
     for row in rows:
         results[row.agreed] = results.get(row.agreed, 0) + 1
     today = datetime.now().date()
+    costs = await usage.costs_for(rows)
+    connected = [r for r in rows if r.connected]
+    spent = sum(c["total"] for c in costs.values())
     return {
+        "script": {"id": active_script.id, "name": active_script.name, "language_style": active_script.language_style,
+                   "agent_name": active_script.agent_name},
+        "dialer": {**dialer, "retry_waiting": retry_waiting},
+        "problems": accounts_runtime.blocking_problems(),
+        "cost": {
+            "total": round(spent, 2),
+            "today": round(sum(costs[r.attempt_id]["total"] for r in rows
+                               if r.call_time and r.call_time.date() == today), 2),
+            "avg_per_call": round(sum(costs[r.attempt_id]["total"] for r in connected) / len(connected), 2)
+            if connected else None,
+            "per_interested": round(spent / results["Interested"], 2) if results.get("Interested") else None,
+        },
         "campaign": campaign,
         "within_calling_hours": _within_window(campaign),
         "max_call_seconds": get_settings().default_max_call_duration_seconds,
@@ -246,7 +278,7 @@ async def overview() -> dict:
         "calls_today": sum(1 for r in rows if r.call_time and r.call_time.date() == today),
         "talk_seconds": sum(r.talk_seconds or 0 for r in rows),
         "live": await _live_call(),
-        "recent": [_row_dict(r) for r in reversed(rows[-8:])],
+        "recent": [_row_dict(r, costs.get(r.attempt_id)) for r in reversed(rows[-8:])],
     }
 
 
@@ -395,6 +427,9 @@ class TestCall(BaseModel):
     name: str = ""
     business: str = ""
     category: str = ""
+    brand: str = ""
+    email: str = ""
+    script_id: str = ""  # try this script; empty = the one calls currently use
 
 
 @router.post("/calls/test", dependencies=[Depends(require_console)])
@@ -427,7 +462,16 @@ async def test_call(body: TestCall) -> dict:
                         dedupe_key=phone, status="pending")
             session.add(lead)
         lead.contact_name, lead.business_name, lead.status = body.name or None, body.business or None, "pending"
-        lead.extra = _with_category({k: v for k, v in (lead.extra or {}).items() if k != "product_category"}, body.category)
+        extra = {k: v for k, v in (lead.extra or {}).items() if k not in ("product_category", "brand", "email")}
+        for key, value in (("brand", body.brand), ("email", body.email)):
+            if value.strip():
+                extra[key] = value.strip()
+        lead.extra = _with_category(extra, body.category)
+        if body.script_id and await script_store.get_script(session, test_c.tenant_id, body.script_id) is None:
+            raise HTTPException(status_code=404, detail="That script no longer exists")
+        # Which script this test uses (empty = the one in use): read when the call connects.
+        test_c.config = {**{k: v for k, v in (test_c.config or {}).items() if k != "call_script_id"},
+                         **({"call_script_id": body.script_id} if body.script_id else {})}
         test_c.status = "active"
         await session.flush()
         lead_id = lead.id  # dispatch may roll back, which expires `lead`
@@ -445,10 +489,12 @@ async def test_call(body: TestCall) -> dict:
 
 
 @router.get("/calls", dependencies=[Depends(require_console)])
-async def list_calls(limit: int = 100) -> list[dict]:
+async def list_calls(limit: int = 1000) -> list[dict]:
     rows = await _console_rows()
+    costs = await usage.costs_for(rows)
     # transcript_lines: lets Call history show which calls have a conversation to read.
-    return [{**_row_dict(r), "transcript_lines": len(r.transcript.splitlines())} for r in reversed(rows[-limit:])]
+    return [{**_row_dict(r, costs.get(r.attempt_id)), "transcript_lines": len(r.transcript.splitlines())}
+            for r in reversed(rows[-limit:])]
 
 
 @router.get("/calls/{attempt_id}", dependencies=[Depends(require_console)])
@@ -461,7 +507,8 @@ async def call_detail(attempt_id: uuid.UUID) -> dict:
     for line in row.transcript.splitlines():
         speaker, _, text = line.partition(": ")
         lines.append({"speaker": "agent" if speaker == "Agent" else "customer", "text": text})
-    return {**_row_dict(row), "facts": row.facts, "transcript": lines}
+    cost = (await usage.costs_for([row])).get(row.attempt_id)
+    return {**_row_dict(row, cost), "facts": row.facts, "transcript": lines, "seconds": row.line_seconds}
 
 
 async def _end_attempt(session, attempt: CallAttempt, reason: str) -> None:
@@ -576,18 +623,91 @@ async def set_calling_hours(body: CallingHours) -> dict:
     return {"start": body.start, "end": body.end}
 
 
+# How many times a lead is tried when nobody answers, and how long to wait in between.
+# The client's choice (console Settings); these defaults are a PLACEHOLDER until they
+# pick: 2 tries, 30 minutes apart.
+DIALER_SETTINGS_KEY = "dialer_settings"
+DIALER_DEFAULTS = {"max_attempts": 2, "retry_gap_minutes": 30}
+
+
+async def _dialer_settings(session, tenant_id) -> dict:
+    saved = await script_store.get_value(session, tenant_id, DIALER_SETTINGS_KEY) or {}
+    out = dict(DIALER_DEFAULTS)
+    for key, low, high in (("max_attempts", 1, 5), ("retry_gap_minutes", 1, 1440)):
+        try:
+            value = int(saved.get(key, out[key]))
+        except (TypeError, ValueError):
+            continue
+        out[key] = min(max(value, low), high)
+    return out
+
+
+class DialerSettings(BaseModel):
+    max_attempts: int = Field(ge=1, le=5)
+    retry_gap_minutes: int = Field(ge=1, le=1440)
+
+
+@router.put("/campaign/retries", dependencies=[Depends(require_console)])
+async def set_retries(body: DialerSettings) -> dict:
+    async with session_scope() as session:
+        leads_c, _ = await _campaigns(session)
+        await script_store.set_value(session, leads_c.tenant_id, DIALER_SETTINGS_KEY, body.model_dump())
+    return body.model_dump()
+
+
+async def _requeue_unanswered(session, campaign: Campaign, *, max_attempts: int, older_than: datetime | None) -> int:
+    """Put leads nobody answered back in the queue. Only leads whose calls never
+    connected are "failed" (lifecycle.finalize_call); a lead who talked to the agent,
+    asked for a callback or is on do-not-call is never retried here."""
+    query = select(Lead).where(Lead.campaign_id == campaign.id, Lead.status == "failed",
+                               Lead.attempts_count < max_attempts)
+    if older_than is not None:
+        query = query.where(Lead.updated_at < older_than)
+    leads = (await session.execute(query.with_for_update(skip_locked=True))).scalars().all()
+    for lead in leads:
+        lead.status = "pending"
+    await session.flush()
+    return len(leads)
+
+
+@router.post("/leads/retry-unanswered", dependencies=[Depends(require_console)])
+async def retry_unanswered() -> dict:
+    """Call the unanswered leads again now (one more try each, whatever the usual limit)."""
+    async with session_scope() as session:
+        leads_c, _ = await _campaigns(session)
+        count = await _requeue_unanswered(session, leads_c, max_attempts=10, older_than=None)
+    return {"requeued": count}
+
+
+@router.delete("/leads", dependencies=[Depends(require_console)])
+async def clear_uncalled_leads() -> dict:
+    """Remove every lead that was never called (a wrong sheet was uploaded). Called
+    leads keep their history; do-not-call is never forgotten."""
+    async with session_scope() as session:
+        leads_c, _ = await _campaigns(session)
+        leads = (await session.execute(
+            select(Lead).where(Lead.campaign_id == leads_c.id, Lead.status == "pending", Lead.attempts_count == 0)
+        )).scalars().all()
+        for lead in leads:
+            await session.delete(lead)
+    return {"deleted": len(leads)}
+
+
 @router.get("/system", dependencies=[Depends(require_console)])
 async def system_status() -> dict:
     s = get_settings()
-    out = {"telephony": s.telephony_provider, "ai_backend": s.ai_backend, "llm": s.openai_llm_model,
-           "public_url_ok": _public_base().startswith("https://"), "balance": None}
-    if s.telephony_provider == "vobiz":
-        try:
-            provider = get_telephony_provider("vobiz")
-            out["balance"] = (await asyncio.wait_for(provider.get_balance("INR"), 8)).get("available_balance")
-        except Exception:  # noqa: BLE001
-            out["balance"] = None
-    return out
+    from services.accounts.costs import current_stack
+
+    stack = current_stack()
+    public_ok = _public_base().startswith("https://")
+    return {
+        "telephony": s.telephony_provider, "ai_backend": s.ai_backend, "llm": s.openai_llm_model,
+        "speech": stack.stt, "public_url_ok": public_ok,
+        "public_url_reachable": public_ok and await _public_url_reachable(),
+        "balance": await usage.live_balance(s.telephony_provider),
+        "problems": accounts_runtime.blocking_problems(),
+        "max_call_seconds": s.default_max_call_duration_seconds,
+    }
 
 
 async def run_console_dialer() -> None:
@@ -603,9 +723,19 @@ async def run_console_dialer() -> None:
                 await _reconcile_live_calls()
             async with session_scope() as session:
                 leads_c, _ = await _campaigns(session)
-                # Tunnel down: wait, rather than burn each lead's attempts on refused calls.
-                if leads_c.status == "active" and _public_base().startswith("https://")                         and await _public_url_reachable():
-                    await _dispatch_one(session, leads_c)
+                # Tunnel down or an account unlinked: wait, rather than burn each lead's
+                # attempts on calls that can't be placed.
+                if (leads_c.status == "active" and not accounts_runtime.blocking_problems()
+                        and _public_base().startswith("https://") and await _public_url_reachable()):
+                    dispatched = await _dispatch_one(session, leads_c)
+                    if not dispatched and tick % RECONCILE_EVERY_TICKS == 0:
+                        settings = await _dialer_settings(session, leads_c.tenant_id)
+                        gap = timedelta(minutes=settings["retry_gap_minutes"])
+                        requeued = await _requeue_unanswered(
+                            session, leads_c, max_attempts=settings["max_attempts"],
+                            older_than=datetime.now(timezone.utc) - gap)
+                        if requeued:
+                            logger.info("console_unanswered_requeued", extra={"leads": requeued})
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 - one bad tick must not stop the dialer

@@ -42,8 +42,8 @@ SARVAM_STT_SAMPLE_RATE_HZ = 16000
 # already sent the segment, or the "turn" was only noise — the flush gets no reply at
 # all, so these waits are kept short: every second here is dead air on the call, and
 # a noise turn would hold up the next real one.
-FINAL_TRANSCRIPT_TIMEOUT_SECONDS = 1.5
-_LATE_SEGMENT_SECONDS = 0.3
+FINAL_TRANSCRIPT_TIMEOUT_SECONDS = 1.2
+_LATE_SEGMENT_SECONDS = 0.2
 
 
 def stt_url(base_url: str, model: str, mode: str, language: str) -> str:

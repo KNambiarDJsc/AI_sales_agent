@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { ArrowLeft, Check, Copy, Download, Phone } from "lucide-react";
-import { api, fmtDuration, fmtTime, type CallDetail } from "@/lib/api";
+import { api, fmtDuration, fmtInr, fmtTime, type CallDetail } from "@/lib/api";
 import { Bubble } from "@/components/LiveCall";
 import { ErrorNote, ResultChip, Spinner } from "@/components/ui";
 
@@ -49,7 +49,7 @@ export default function CallDetailPage() {
 
   return (
     <>
-      <Link href="/calls" className="mb-6 inline-flex items-center gap-1.5 text-sm text-haze hover:text-white">
+      <Link href="/calls" className="mb-6 inline-flex items-center gap-1.5 text-sm text-haze hover:text-ink">
         <ArrowLeft className="h-4 w-4" /> Call history
       </Link>
       <ErrorNote message={error} />
@@ -60,7 +60,7 @@ export default function CallDetailPage() {
             <div className="card card-glow p-6">
               <p className="font-display text-2xl font-bold">{call.name || "Unnamed lead"}</p>
               <p className="text-haze">{call.business || "—"}</p>
-              <p className="mt-2 flex items-center gap-1.5 font-mono text-sm"><Phone className="h-3.5 w-3.5 text-hotpink" /> {call.phone}</p>
+              <p className="mt-2 flex items-center gap-1.5 font-mono text-sm"><Phone className="h-3.5 w-3.5 text-ultra" /> {call.phone}</p>
               <div className="mt-5"><ResultChip result={call.result} /></div>
               <dl className="mt-5 space-y-2 text-sm">
                 <Row k="When" v={fmtTime(call.time)} />
@@ -70,6 +70,18 @@ export default function CallDetailPage() {
                 <Row k="List" v={call.campaign} />
               </dl>
             </div>
+            {call.cost != null && call.cost_parts && (
+              <div className="card p-6">
+                <p className="label">Approx. cost of this call</p>
+                <p className="font-display text-3xl font-bold tabular-nums">{fmtInr(call.cost)}</p>
+                <dl className="mt-3 space-y-2 text-sm">
+                  <Row k={call.cost_phone_actual ? "Phone line (billed)" : "Phone line"} v={fmtInr(call.cost_parts.phone)} />
+                  <Row k="Listening" v={fmtInr(call.cost_parts.listening)} />
+                  <Row k="Voice" v={fmtInr(call.cost_parts.voice)} />
+                  <Row k="Brain (AI)" v={fmtInr(call.cost_parts.brain)} />
+                </dl>
+              </div>
+            )}
             {call.summary && (
               <div className="card p-6">
                 <p className="label">Summary</p>
@@ -79,7 +91,7 @@ export default function CallDetailPage() {
             {call.facts && (
               <div className="card p-6">
                 <p className="label">What we learned</p>
-                <p className="whitespace-pre-line text-sm leading-relaxed text-zinc-300">{call.facts}</p>
+                <p className="whitespace-pre-line text-sm leading-relaxed text-zinc-700">{call.facts}</p>
               </div>
             )}
           </div>

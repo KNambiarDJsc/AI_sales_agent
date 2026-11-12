@@ -49,14 +49,16 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from sqlalchemy import select
 
-from config.settings import PROMPTS_DIR, get_settings
+from config.settings import get_settings
 from database.models import CallAttempt, Campaign, Conversation, Lead, Tenant
 from database.session import session_scope
 from llm.factory import get_llm_provider
 from orchestrator.context import ConversationContext
 from orchestrator.engine import ConversationEngine
-from orchestrator.prompts import load_campaign_prompt
-from orchestrator.state_machine import StateMachine, load_script_by_id
+from apps.api.console_auth import token_is_valid
+from voice.session.opening import lead_fields
+from orchestrator.state_machine import StateMachine
+from services.scripts.store import flow_for_campaign
 from services.call_worker.lifecycle import finalize_call
 from speech.stt.factory import get_stt_provider
 from speech.tts.factory import get_tts_provider
@@ -131,10 +133,21 @@ async def demo_page() -> str:
     return DEMO_HTML
 
 
+def _query(websocket: WebSocket, name: str, limit: int = 80) -> str:
+    return (websocket.query_params.get(name) or "").strip()[:limit]
+
+
 @router.websocket("/demo/ws")
 async def demo_ws(websocket: WebSocket) -> None:
-    await websocket.accept()
     settings = get_settings()
+    # The demo spends the account's AI credit, so with the console enabled it needs the
+    # console's login (the console opens /demo with its token).
+    if settings.console_password and not token_is_valid(_query(websocket, "token", 400)):
+        await websocket.accept()
+        await websocket.send_text(json.dumps({"type": "error", "text": "Please open the voice demo from the console (log in first)."}))
+        await websocket.close(code=4401)
+        return
+    await websocket.accept()
     tts_provider = get_tts_provider()
     stt_provider = get_stt_provider()
     stt_rate = getattr(stt_provider, "input_sample_rate_hz", CAPTURE_RATE_HZ)
@@ -150,8 +163,9 @@ async def demo_ws(websocket: WebSocket) -> None:
             phone_e164="+10000000000",
             raw_phone="browser-demo",
             dedupe_key=f"demo-{uuid.uuid4().hex[:14]}",  # dedupe_key is VARCHAR(20)
-            contact_name="Demo User",
-            business_name="Demo Business",
+            contact_name=_query(websocket, "name") or None,
+            business_name=_query(websocket, "business") or "Demo Business",
+            extra={k: v for k in ("brand", "email", "product_category") if (v := _query(websocket, k))},
             status="in_progress",
         )
         session.add(lead)
@@ -163,15 +177,19 @@ async def demo_ws(websocket: WebSocket) -> None:
         session.add(attempt)
         await session.flush()
 
-        script = load_script_by_id(campaign.script_id)
+        # Preview the console's scripts: the one asked for (?script=), else the one in use.
+        console_tenant = (await session.execute(
+            select(Tenant).where(Tenant.name == (settings.console_tenant_name or "Console"))
+        )).scalar_one_or_none()
+        script, campaign_prompt, script_values = await flow_for_campaign(
+            session, campaign, tenant_id=console_tenant.id if console_tenant else None,
+            script_id=_query(websocket, "script") or None,
+        )
         conversation = Conversation(
             call_attempt_id=attempt.id, script_id=script.script_id, script_version=script.version, current_state="INTRO"
         )
         session.add(conversation)
         await session.flush()
-
-        campaign_prompt_path = campaign.config.get("campaign_prompt_path") or (PROMPTS_DIR / "campaign_prompt_template.yaml")
-        campaign_prompt = load_campaign_prompt(campaign_prompt_path)
 
         tenant_id, campaign_id, lead_id, conversation_id = tenant.id, campaign.id, lead.id, conversation.id
         attempt_id = attempt.id
@@ -184,7 +202,7 @@ async def demo_ws(websocket: WebSocket) -> None:
         script_id=script.script_id,
         script_version=script.version,
         current_state="INTRO",
-        lead_fields={"contact_name": lead.contact_name, "business_name": lead.business_name},
+        lead_fields={**lead_fields(lead.contact_name, lead.business_name, lead.extra), **script_values},
         campaign_prompt=campaign_prompt,
         timezone=campaign_timezone,
     )
@@ -637,7 +655,7 @@ startBtn.onclick = async () => {
     log('error', '⚠ Microphone unavailable: ' + err.message); startBtn.disabled = false; return;
   }
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  ws = new WebSocket(proto + '://' + location.host + '/demo/ws');
+  ws = new WebSocket(proto + '://' + location.host + '/demo/ws' + location.search);
   ws.binaryType = 'arraybuffer';
   ws.onmessage = onMessage;
   ws.onopen = () => { talkBtn.disabled = false; setStatus('Connecting…'); };

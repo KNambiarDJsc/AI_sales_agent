@@ -4,7 +4,7 @@ import { Suspense, useEffect, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { PhoneOff, PhoneOutgoing, RotateCcw, ShieldCheck, Smartphone } from "lucide-react";
-import { api, fmtDuration, type CallDetail, type LiveCall } from "@/lib/api";
+import { api, fmtDuration, fmtInr, type CallDetail, type LiveCall, type ScriptSummary } from "@/lib/api";
 import { LiveCallCard, Bubble } from "@/components/LiveCall";
 import { ErrorNote, PageHeader, ResultChip, Spinner } from "@/components/ui";
 
@@ -25,7 +25,14 @@ function TestCall() {
     name: params.get("name") ?? "",
     business: params.get("business") ?? "",
     category: params.get("category") ?? "",
+    brand: "",
+    email: "",
+    script_id: params.get("script") ?? "",
   });
+  const [scripts, setScripts] = useState<ScriptSummary[]>([]);
+  useEffect(() => {
+    api.scripts().then((l) => setScripts(l.scripts)).catch(() => {});
+  }, []);
   const [phase, setPhase] = useState<Phase>("idle");
   const [attemptId, setAttemptId] = useState<string | null>(null);
   const [live, setLive] = useState<LiveCall | null>(null);
@@ -117,9 +124,24 @@ function TestCall() {
               <input className="input" placeholder="Demo Business" value={form.business} onChange={(e) => setForm({ ...form, business: e.target.value })} />
             </div>
           </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="label">Brand they sell</label>
+              <input className="input" placeholder="Samsung" value={form.brand} onChange={(e) => setForm({ ...form, brand: e.target.value })} />
+            </div>
+            <div>
+              <label className="label">Email (if known)</label>
+              <input className="input" placeholder="shop@gmail.com" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} />
+            </div>
+          </div>
           <div>
-            <label className="label">What they sell</label>
-            <input className="input" placeholder="Perfumes" value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} />
+            <label className="label" htmlFor="tc-script">Script</label>
+            <select id="tc-script" className="input" value={form.script_id} onChange={(e) => setForm({ ...form, script_id: e.target.value })}>
+              <option value="">The one calls use now{scripts.find((s) => s.active) ? ` — ${scripts.find((s) => s.active)!.name}` : ""}</option>
+              {scripts.filter((s) => !s.active).map((s) => (
+                <option key={s.id} value={s.id}>{s.name}</option>
+              ))}
+            </select>
           </div>
           <ErrorNote message={error} />
           <button className="btn btn-primary w-full py-3.5 text-base" disabled={busy || !form.phone}>
@@ -154,8 +176,9 @@ function TestCall() {
                 <p className="mr-auto font-display text-xl font-semibold">Call finished</p>
                 <ResultChip result={result.result} />
                 <span className="text-sm text-haze">{fmtDuration(result.talk_seconds)}</span>
+                {result.cost != null && <span className="text-sm text-haze">· cost ~{fmtInr(result.cost)}</span>}
               </div>
-              {result.summary && <p className="mb-4 rounded-xl bg-white/[0.04] p-3 text-sm">{result.summary}</p>}
+              {result.summary && <p className="mb-4 rounded-xl bg-black/[0.04] p-3 text-sm">{result.summary}</p>}
               <div className="max-h-96 space-y-3 overflow-y-auto">
                 {result.transcript.map((l, i) => <Bubble key={i} speaker={l.speaker} text={l.text} />)}
               </div>
@@ -170,7 +193,7 @@ function TestCall() {
             <div className="card flex h-full min-h-72 flex-col items-center justify-center gap-2 p-10 text-center">
               <p className="font-display text-xl font-semibold">Your phone rings in a few seconds</p>
               <p className="max-w-sm text-sm text-haze">
-                Enter your own number, hit call, and talk to the agent like a lead would. You can reply in English, Hindi or Hinglish.
+                Enter your own number, hit call, and talk to the agent like a lead would. You can reply in Hindi, Hinglish or English.
               </p>
             </div>
           )}

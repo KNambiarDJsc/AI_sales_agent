@@ -62,9 +62,10 @@ class SarvamTTSProvider(TTSProvider):
     sample_rate_hz = SARVAM_TTS_SAMPLE_RATE_HZ
     backend = "sarvam"
 
-    def __init__(self) -> None:
+    def __init__(self, api_key: str | None = None) -> None:
         s = get_settings()
-        self._key = s.sarvam_api_key
+        # `api_key`: a key being checked before it is linked (services/accounts/runtime.py).
+        self._key = api_key or s.sarvam_api_key
         self._model = s.sarvam_tts_model
         self._speaker_hi = s.sarvam_tts_speaker
         self._speaker_en = s.sarvam_tts_speaker_en or s.sarvam_tts_speaker

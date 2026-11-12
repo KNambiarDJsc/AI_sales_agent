@@ -1,5 +1,15 @@
 # Status
 
+## Vercel deployment and login recovery (2026-11-12)
+
+- Console production URL: https://dialwave.vercel.app (Vercel project `clue-code/dialwave`, source directory `web/`).
+- Fixed public login: the live backend lacked the Vercel origins in `CONSOLE_ALLOWED_ORIGINS`. Added both production aliases to the local configuration and example, then restarted the backend after checking no call was active.
+- Verified public CORS preflight, login, and authenticated overview, leads, calls, scripts, accounts and system endpoints: all HTTP 200. No outbound phone calls were placed during verification.
+- Recovered work includes script management, provider accounts, call cost reporting and console UI changes. Added missing direct dependencies for credential encryption and document imports to `requirements.txt` using installed versions.
+- Hosting limitation: the API, database and Cloudflare tunnel still run on this Windows computer. Keep it awake, online and the backend running for client access. This is not an independently hosted backend.
+- Production currently uses Vercel `BACKEND_URL`. If the quick tunnel changes, update that variable and redeploy `web/`. The existing `/api/config` supports Edge Config, but no Edge Config connection is provisioned and the tunnel script does not publish to it automatically.
+
+
 Last updated: 2026-11-03 (Hindi calls: Sarvam speech, do-not-call guard, greeting fixes). Read
 this before adding anything — it tracks what's real vs. placeholder, and what happens when client
 materials (code, prompts, scripts, credentials, models) arrive.

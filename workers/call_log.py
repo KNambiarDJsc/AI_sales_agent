@@ -23,7 +23,7 @@ import logging
 import re
 import threading
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -75,6 +75,17 @@ class CallRow:
     provider: str
     attempt_id: str
     lead_id: str = ""
+    # What the call used, for the cost estimate (services/accounts/costs.py).
+    started_utc: datetime | None = None
+    provider_call_id: str = ""
+    connected: bool = False
+    line_seconds: int = 0          # how long the phone line was up (provider's or ours)
+    agent_chars: int = 0           # characters the voice spoke
+    llm_turns: int = 0
+    prompt_tokens: int = 0
+    cached_tokens: int = 0
+    completion_tokens: int = 0
+    llm_model: str = ""
 
 
 def _agreed(
@@ -112,20 +123,47 @@ def _is_logged(provider: str, campaign_name: str) -> bool:
     return not (pattern and re.search(pattern, campaign_name or ""))
 
 
+# Rows of finished calls, kept between requests: the console asks for every call every
+# few seconds, and building a row takes several queries (turns, transcript,
+# qualification, callback). A finished row only changes if the call or its lead is
+# edited afterwards - both are in the key.
+_FINISHED = {"completed", "failed", "no_answer", "busy", "canceled"}
+_SETTLE_SECONDS = 90  # the last turns and the qualification are written just after the call ends
+_row_cache: dict[tuple, CallRow] = {}
+_ROW_CACHE_MAX = 20_000
+
+
+def clear_row_cache() -> None:
+    _row_cache.clear()
+
+
 async def collect_rows(campaign_ids: set | None = None, apply_skip_filter: bool = True) -> list[CallRow]:
     """One row per call attempt, oldest first. `campaign_ids` limits it to those
     campaigns (the client console); otherwise every real call (see _is_logged)."""
     rows: list[CallRow] = []
     scripts: dict[str, tuple[set[str], set[str]]] = {}
+    now = datetime.now(timezone.utc)
     async with session_scope() as session:
         query = select(CallAttempt).order_by(CallAttempt.created_at)
         if campaign_ids is not None:
             query = query.where(CallAttempt.campaign_id.in_(list(campaign_ids)))
         attempts = (await session.execute(query)).scalars().all()
+        campaigns = {c.id: c for c in (await session.execute(
+            select(Campaign).where(Campaign.id.in_({a.campaign_id for a in attempts})))).scalars()} if attempts else {}
+        lead_ids = list({a.lead_id for a in attempts})
+        leads: dict = {}
+        for i in range(0, len(lead_ids), 5000):
+            leads.update({lead.id: lead for lead in (await session.execute(
+                select(Lead).where(Lead.id.in_(lead_ids[i:i + 5000])))).scalars()})
         for attempt in attempts:
-            lead = await session.get(Lead, attempt.lead_id)
-            campaign = await session.get(Campaign, attempt.campaign_id)
+            lead = leads.get(attempt.lead_id)
+            campaign = campaigns.get(attempt.campaign_id)
             if lead is None or campaign is None or (apply_skip_filter and not _is_logged(attempt.provider, campaign.name)):
+                continue
+            cache_key = (attempt.id, attempt.updated_at, lead.updated_at, campaign.script_id)
+            settled = attempt.status in _FINISHED and (now - attempt.updated_at).total_seconds() > _SETTLE_SECONDS
+            if settled and cache_key in _row_cache:
+                rows.append(_row_cache[cache_key])
                 continue
             if campaign.script_id not in scripts:
                 try:
@@ -141,6 +179,8 @@ async def collect_rows(campaign_ids: set | None = None, apply_skip_filter: bool 
             path: list[str] = []
             lines: list[str] = []
             last_customer = ""
+            agent_chars = llm_turns = prompt_tokens = cached_tokens = completion_tokens = 0
+            llm_model = ""
             qualification = callback = None
             if conversation is not None:
                 turns = (await session.execute(
@@ -159,6 +199,17 @@ async def collect_rows(campaign_ids: set | None = None, apply_skip_filter: bool 
                         if not path or path[-1] != state:
                             path.append(state)
                     text = segments.get(turn.id, "")
+                    if turn.speaker == "agent":
+                        agent_chars += len(text)
+                        raw = turn.raw_llm_output or {}
+                        usage = raw.get("_usage")
+                        if raw.get("intent") != "scripted_opening":
+                            llm_turns += 1
+                        if isinstance(usage, dict):
+                            prompt_tokens += int(usage.get("prompt_tokens") or 0)
+                            cached_tokens += int(usage.get("cached_tokens") or 0)
+                            completion_tokens += int(usage.get("completion_tokens") or 0)
+                            llm_model = str(usage.get("model") or llm_model)
                     if text:
                         lines.append(f"{'Agent' if turn.speaker == 'agent' else 'Customer'}: {text}")
                         if turn.speaker == "customer":
@@ -179,7 +230,10 @@ async def collect_rows(campaign_ids: set | None = None, apply_skip_filter: bool 
                 talk = int((conversation.ended_at - conversation.created_at).total_seconds())
             tz = campaign.timezone
             callback_time = _local(callback.requested_time, callback.timezone or tz) if callback else None
-            rows.append(CallRow(
+            line_seconds = attempt.duration_seconds or 0
+            if not line_seconds and attempt.ended_at is not None and conversation is not None:
+                line_seconds = max(0, int((attempt.ended_at - conversation.created_at).total_seconds()))
+            row = CallRow(
                 call_time=_local(attempt.created_at, tz),
                 name=lead.contact_name or "",
                 business=lead.business_name or "",
@@ -200,7 +254,22 @@ async def collect_rows(campaign_ids: set | None = None, apply_skip_filter: bool 
                 provider=attempt.provider,
                 attempt_id=str(attempt.id),
                 lead_id=str(lead.id),
-            ))
+                started_utc=attempt.created_at,
+                provider_call_id=attempt.provider_call_id or "",
+                connected=conversation is not None,
+                line_seconds=line_seconds or (talk or 0),
+                agent_chars=agent_chars,
+                llm_turns=llm_turns,
+                prompt_tokens=prompt_tokens,
+                cached_tokens=cached_tokens,
+                completion_tokens=completion_tokens,
+                llm_model=llm_model,
+            )
+            rows.append(row)
+            if settled:
+                if len(_row_cache) >= _ROW_CACHE_MAX:
+                    _row_cache.clear()
+                _row_cache[cache_key] = row
     return rows
 
 

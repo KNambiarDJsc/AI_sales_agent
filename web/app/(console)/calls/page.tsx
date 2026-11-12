@@ -4,7 +4,7 @@ import { useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Download, FileText, History, Search } from "lucide-react";
-import { api, download, fmtDuration, fmtTime, type CallRow } from "@/lib/api";
+import { api, download, fmtDuration, fmtTime, type CallRow, fmtInr } from "@/lib/api";
 import { usePoll } from "@/lib/usePoll";
 import { Empty, ErrorNote, PageHeader, ResultChip, Spinner } from "@/components/ui";
 
@@ -50,8 +50,8 @@ export default function CallsPage() {
                 onClick={() => setFilter(f)}
                 className={`rounded-full border px-3 py-1 text-xs font-semibold transition ${
                   filter === f
-                    ? "border-hotpink/60 bg-hotpink/15 text-pink-100"
-                    : "border-white/10 bg-white/[0.03] text-haze hover:border-white/25 hover:text-white"
+                    ? "border-ultra/50 bg-ultra/10 text-ultra"
+                    : "border-black/10 bg-black/[0.03] text-haze hover:border-black/25 hover:text-ink"
                 }`}
               >
                 {f} <span className="ml-1 tabular-nums opacity-70">{counts[f] ?? 0}</span>
@@ -81,13 +81,14 @@ export default function CallsPage() {
           <>
             <p className="mb-3 text-xs text-haze">Click any call to read its full transcript.</p>
             <div className="-mx-5 overflow-x-auto">
-              <table className="w-full min-w-[820px] text-left text-sm">
+              <table className="w-full min-w-[900px] text-left text-sm">
                 <thead className="text-xs uppercase tracking-wider text-haze">
                   <tr>
                     <th className="px-5 py-2 font-semibold">When</th>
                     <th className="px-3 py-2 font-semibold">Lead</th>
                     <th className="px-3 py-2 font-semibold">Result</th>
                     <th className="px-3 py-2 font-semibold">Length</th>
+                    <th className="px-3 py-2 font-semibold">Cost</th>
                     <th className="px-3 py-2 font-semibold">Summary</th>
                     <th className="px-5 py-2 text-right font-semibold">Transcript</th>
                   </tr>
@@ -120,7 +121,8 @@ function CallTableRow({ call: c, onOpen }: { call: CallRow; onOpen: () => void }
       </td>
       <td className="px-3 py-3"><ResultChip result={c.result} /></td>
       <td className="px-3 py-3 tabular-nums text-haze">{fmtDuration(c.talk_seconds)}</td>
-      <td className="max-w-sm px-3 py-3 text-xs text-zinc-300">
+      <td className="whitespace-nowrap px-3 py-3 tabular-nums text-haze">{c.cost == null ? "—" : `~${fmtInr(c.cost)}`}</td>
+      <td className="max-w-sm px-3 py-3 text-xs text-zinc-700">
         <p className="line-clamp-2">{c.summary || c.callback_time || "—"}</p>
       </td>
       <td className="whitespace-nowrap px-5 py-3 text-right">
@@ -129,8 +131,8 @@ function CallTableRow({ call: c, onOpen }: { call: CallRow; onOpen: () => void }
           onClick={(e) => e.stopPropagation()}
           className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-semibold transition ${
             lines
-              ? "border-hotpink/40 bg-hotpink/10 text-pink-100 hover:bg-hotpink/20"
-              : "border-white/10 text-haze hover:text-white"
+              ? "border-ultra/30 bg-ultra/5 text-ultra hover:bg-ultra/10"
+              : "border-black/10 text-haze hover:text-ink"
           }`}
         >
           <FileText className="h-3.5 w-3.5" />

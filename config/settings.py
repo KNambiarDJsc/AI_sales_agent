@@ -80,6 +80,13 @@ class Settings(BaseSettings):
         "everyday spoken Hindi, never bookish. Tone: polite, confident, smiling. Pace: natural and clear, not slow."
     )
     openai_llm_model: str = "gpt-4.1-mini"
+    # Reading an uploaded call script (services/scripts/compiler.py): once per upload,
+    # never during a call, so a more careful model is worth its price (~₹1 per upload).
+    # On the client's own rambling voice-note text, gpt-4.1-mini mixed up which blank is
+    # the shop's name and garbled one fact; gpt-5.4-mini with low reasoning got both
+    # right. Empty = use the call model.
+    openai_script_model: str = "gpt-5.4-mini"
+    openai_script_reasoning_effort: str = "low"
     # Budget guard (see _refuse_expensive_models): a key funded for testing was emptied
     # once by a flagship model. Set true only on purpose.
     allow_expensive_openai_models: bool = False
@@ -88,7 +95,14 @@ class Settings(BaseSettings):
     openai_llm_reasoning_effort: str = ""
     # "" = standard processing; "priority" = OpenAI Fast mode (faster, ~1.75x token
     # price — gpt-4.1-mini $0.70/$2.80 per 1M; still < $0.02 per call).
-    openai_llm_service_tier: str = ""
+    # 2026-11-12, 32 simulated turns of the client's Hinglish script per setting, time to
+    # the reply's first phrase: standard median 1.17 s, p90 1.50 s, and on live calls
+    # the first token took 0.7-3 s; priority median 0.98 s, p90 1.05 s. The slow
+    # replies are what the client hears as "delay", so priority is on: about ₹0.5 more
+    # per 2-minute call. gpt-5.4-mini was no faster and made judgement errors
+    # gpt-4.1-mini didn't (put a "rehne do" lead on do-not-call, masculine verb forms,
+    # asked about time zones); gpt-5.4-nano lost the conversation state.
+    openai_llm_service_tier: str = "priority"
     # A reply is one or two short sentences plus the JSON around them (~150 tokens in
     # Hindi). The cap stops a runaway reply — a stream that hit the 8 s turn limit on a
     # live call ended in the fallback line ("Sorry, is this Demo Business?") after the
@@ -298,7 +312,8 @@ class Settings(BaseSettings):
         gpt-4.1-nano and empties a small test budget in a few calls."""
         if self.allow_expensive_openai_models:
             return self
-        for field in ("openai_llm_model", "openai_stt_model", "openai_tts_model", "openai_realtime_stt_model"):
+        for field in ("openai_llm_model", "openai_stt_model", "openai_tts_model", "openai_realtime_stt_model",
+                      "openai_script_model"):
             model = getattr(self, field) or ""
             if _EXPENSIVE_MODEL.search(model):
                 raise ValueError(
@@ -335,6 +350,17 @@ class Settings(BaseSettings):
     vad_min_speech_segment_ms: int = Field(default=200, ge=150, le=250)
     vad_end_of_turn_ms: int = Field(default=600, ge=550, le=800)
     vad_max_turn_seconds: int = Field(default=25, ge=20, le=30)
+    # Ask for the transcript this long into a pause, instead of only once the turn has
+    # ended (vad_end_of_turn_ms): the words are then already there when the turn ends,
+    # so the reply starts ~0.2-0.3 s sooner. If the customer goes on talking, what was
+    # heard so far is kept and joined with the rest. 0 = off.
+    early_transcript_ms: int = Field(default=300, ge=0, le=500)
+    # A short, complete answer ("haan", "nahi chahiye", "kal subah") doesn't need the
+    # full end-of-turn silence: with the early transcript in hand and at most
+    # short_reply_max_words in it, the turn ends after this much silence. People
+    # pause mid-sentence in long answers, not after "haan ji". 0 = off.
+    short_reply_end_of_turn_ms: int = Field(default=420, ge=0, le=800)
+    short_reply_max_words: int = Field(default=3, ge=1, le=8)
     # Caught on a live Exotel call: barge-in fired before the agent's opening line had
     # sent a single frame, repeatedly, throughout the call — almost certainly the
     # agent's own TTS audio leaking back as "inbound" (acoustic/line echo on the real

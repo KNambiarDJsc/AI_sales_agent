@@ -37,7 +37,7 @@ export function LiveCallCard({ live, limit = 120, onEnded }: { live: Live; limit
   const left = Math.max(0, limit - live.seconds);
   return (
     <div className="card card-glow overflow-hidden">
-      <div className="flex flex-wrap items-center gap-4 border-b border-white/5 p-5">
+      <div className="flex flex-wrap items-center gap-4 border-b border-black/5 p-5">
         <div className="relative flex h-12 w-12 items-center justify-center rounded-full bg-volt text-ink-950 animate-pulse-ring">
           <PhoneCall className="h-5 w-5" />
         </div>
@@ -59,13 +59,13 @@ export function LiveCallCard({ live, limit = 120, onEnded }: { live: Live; limit
             {mmss(live.seconds)}
             <span className="text-base font-medium text-haze"> / {mmss(limit)}</span>
           </p>
-          <div className="mt-1 h-1 w-28 overflow-hidden rounded-full bg-white/10">
+          <div className="mt-1 h-1 w-28 overflow-hidden rounded-full bg-black/10">
             <div
               className={`h-full rounded-full ${left <= 20 ? "bg-rose-500" : "bg-volt"}`}
               style={{ width: `${Math.min(100, (live.seconds / limit) * 100)}%` }}
             />
           </div>
-          <p className="text-xs font-medium text-hotpink">
+          <p className="text-xs font-medium text-ultra">
             {talking ? STATE_LABEL[live.state ?? ""] ?? live.state ?? "Talking" : "Ringing…"}
           </p>
           <button
@@ -112,7 +112,7 @@ export function Bubble({ speaker, text }: { speaker: "agent" | "customer"; text:
       </div>
       <div
         className={`max-w-[80%] rounded-2xl px-3.5 py-2 text-sm leading-relaxed ${
-          agent ? "rounded-tl-sm bg-white/[0.06]" : "rounded-tr-sm bg-cyanx/10 text-cyan-50"
+          agent ? "rounded-tl-sm bg-black/[0.06]" : "rounded-tr-sm bg-cyanx/10 text-cyan-800"
         }`}
       >
         {text}
